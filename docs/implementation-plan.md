@@ -19,7 +19,7 @@ DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口�
 
 1. 用 Electron 做窗口壳，托管 `dsh web` 子进程，复用 100% 原功能，上游零改动。
 2. 上游更新不影响壳：壳依赖 npm 发布版，与源码解耦；同时支持「开发模式」直接托管源码 checkout。
-3. 内置 Node 运行时，用户零依赖。
+3. 运行时用 Electron 内嵌 Node，用户零依赖（不额外内置官方 Node；必要时启用兜底）。
 4. 提供方便的插件安装、开发、调试体验。
 
 ### 1.3 非目标（刻意不做）
@@ -33,9 +33,9 @@ DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口�
 | 编号 | 决策 | 理由 |
 |---|---|---|
 | AD-1 | 独立仓库 `~/Learn/dsh-desktop`，不放进上游仓库 | 上游持续更新，壳与源码彻底解耦；合并/更新互不干扰 |
-| AD-2 | Electron 只做窗口壳；引擎是壳托管的 `dsh web` 子进程；BrowserWindow 加载 `http://127.0.0.1:<随机端口>` | 复用原版 UI 零改动；进程隔离；原生模块按系统 Node ABI 编译，避开 Electron ABI 问题 |
+| AD-2 | Electron 只做窗口壳；引擎是壳托管的 `dsh web` 子进程（用 Electron 内嵌 Node 派生，`ELECTRON_RUN_AS_NODE=1`）；BrowserWindow 加载 `http://127.0.0.1:<随机端口>` | 复用原版 UI 零改动；进程隔离、生命周期与窗口解耦；内嵌 Node 的 ABI 风险与对策见 §3.4/§8 |
 | AD-3 | 发布版引擎用 npm 发布包 `@deepseek-ai/dsh` + `@deepseek-ai/dsh-web-frontend`，锁版本装在壳的 `resources/engine` 独立安装区；上游未发布/发布不全的包退化为「锁定上游 commit 构建 + `npm pack` tarball」安装（见 §3.3） | 开箱即用、版本可控、升级只换引擎；不依赖上游发布节奏 |
-| AD-4 | 发布版内置**官方 Node.js 发行版**二进制（Node 22 LTS，满足上游 `^22.19 \|\| >=24` 引擎要求） | 用户零依赖；引擎是 Node 程序，运行时必须随应用走；Electron 内嵌 Node 因 ABI 与版本不可控不作主路径（见 §3.4）；无法检测到时引导安装 |
+| AD-4 | 引擎子进程用 **Electron 内嵌 Node** 运行（`ELECTRON_RUN_AS_NODE=1`）；锁定 Electron ≥ 40（Node 24）满足上游 `^22.19 \|\| >=24`；原生模块用 `@electron/rebuild` 重编；**内置官方 Node 为兜底**（2026-08-14 定，见 §3.4） | 零额外运行时体积、用户零依赖；风险已知且可控：ABI 差异、版本随 Electron 走，出问题可低成本切回官方 Node 兜底 |
 | AD-5 | 用户数据全部留在 `$DSH_HOME`（默认 `~/.dsh`），壳不迁移、不接管 | 与上游 CLI 共享数据，升级只换引擎 |
 | AD-6 | 插件安装/卸载/更新一律走上游 `dsh plugin --profile web <pnpm args>`，壳只编排重启 | 上游已实现 pnpm 安装 + bundles reconcile，壳不重复造轮子 |
 | AD-7 | 结构变更（装/卸/更新插件）后自动重启引擎；配置变更走 profile patch HMR 热生效 | web profile 的 HMR 是配置级的，新行不一定能热挂载，而引擎 boot 仅数秒 |
@@ -57,7 +57,7 @@ DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口�
 │  ├─ updater.ts    引擎版本检查/升级 + electron-updater 应用更新                  │
 │  └─ index.ts      生命周期、单实例锁、托盘、窗口                                 │
 │         │                                                                        │
-│         │ spawn（内置 Node 或系统 Node ≥22.19）                                  │
+│         │ spawn（Electron 内嵌 Node：ELECTRON_RUN_AS_NODE=1）                                  │
 │         ▼                                                                        │
 │  ┌─────────────────────────── dsh web（子进程）──────────────────────────┐      │
 │  │  Node 宿主：web profile（$DSH_HOME/profiles/web）                      │      │
@@ -81,8 +81,8 @@ DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口�
 
 ### 3.2 引擎托管（harness.ts）关键点
 
-1. **运行时选择**：优先内置 Node 二进制（`resources/node/`）；否则检测系统 `node` ≥ 22.19；都没有则引导安装。
-2. **启动**：`<node> <resources>/engine/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --port 0`（随机端口），监听 stdout，匹配 `dsh web: http://127.0.0.1:<port>` 行（上游启动时打印 URL）拿到真实端口；就绪后 BrowserWindow 加载。
+1. **运行时选择**：默认用 Electron 内嵌 Node（`ELECTRON_RUN_AS_NODE=1` + `process.execPath` 派生引擎子进程）；启动时核对 `process.versions.node` 满足引擎 engines（`^22.19 || >=24`，锁定 Electron ≥ 40 即 Node 24）；兜底方案启用时切换为内置官方 Node（§3.4）。
+2. **启动**：以 `ELECTRON_RUN_AS_NODE=1` 用 `process.execPath` 派生 `<node>`，执行 `<resources>/engine/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --port 0`（随机端口），监听 stdout，匹配 `dsh web: http://127.0.0.1:<port>` 行（上游启动时打印 URL）拿到真实端口；就绪后 BrowserWindow 加载。
 3. **健康检查**：端口可连 + `GET /` 返回 200 且页面包含 `__DSH_BOOT__` 注入脚本（生产模式禁止加载裸 Vite/静态页）。
 4. **优雅停机**：关窗 → 向引擎发 SIGTERM → 等待退出（上限 N 秒）→ 超时强杀；退出码 0 视为正常关闭静默处理，非 0 弹错误诊断（AD-10）。
 5. **启动失败诊断**：上游 `assertEntriesLoaded/Activated` 会把解析不到的插件变成启动失败并指名插件名，`installFailLoud` 输出一行带标签的 stderr 后 `exit(1)`；壳解析 stderr → 渲染友好错误卡片（「插件 X 未找到」等），附完整日志。
@@ -91,8 +91,7 @@ DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口�
 
 ```
 resources/
-├─ node/                内置 Node 二进制（按平台 CI 下载，见 Phase 2）
-└─ engine/              dsh 引擎独立安装区
+└─ engine/              dsh 引擎独立安装区（resources/node/ 兜底保留，切换方案时启用，见 §3.4）
    └─ node_modules/     @deepseek-ai/dsh、@deepseek-ai/dsh-web-frontend 及其依赖
                         （npm 安装，普通布局；不用 pnpm 隔离布局）
 ```
@@ -106,9 +105,17 @@ resources/
 
 两条路径运行时无感；`scripts/install-engine.ts` 统一实现「先查 registry，缺失则走构建兜底」。
 
-### 3.4 为什么不用 Electron 自带的 Node（FAQ）
+### 3.4 运行时选择：Electron 内嵌 Node（决策记录，2026-08-14）
 
-Electron 每个应用都内嵌完整 Node 运行时（main 进程 `process.versions.node` 可见），但那是「Electron 版 Node」，不是官方 Node：ABI（`NODE_MODULE_VERSION`）不同，版本随 Electron 发布节奏走、不可独立升级。已核实（2026-08，endoflife.date）：Electron 39 = Node 22，Electron 40 起 = Node 24；dsh 引擎要求 `^22.19 || >=24`，当前 Electron 恰好满足，但每次 Electron 跨 major 都要重新核对，且无法锁定引擎需要的 Node 小版本。引擎及其插件生态按官方 Node ABI 工作：dsh 自带 Linux 原生插件 `node-addon-landlock-run`，生产 bin 依赖可选原生 helper `node-addon-require-builtin`，第三方插件也可能带 node-gyp 依赖——按 Electron ABI 重编（electron-rebuild）会与「同一套引擎在 CLI/系统 Node 下运行」的目标冲突。因此「内置 Node」内置的是官方 Node.js 发行版二进制（nodejs.org 构建，约 30MB），引擎子进程跑在官方 Node 上：原生模块零重编、Node 版本可独立锁定与升级、与上游 CLI 场景行为一致。Electron 的 Node（`ELECTRON_RUN_AS_NODE=1`）仅保留为内置二进制缺失时的兜底候选，不作主路径。内置 Node 的决策与引擎代码如何进入 `resources/engine`（registry 包或构建产物）无关——引擎是 Node 程序，任何形态下运行时都必须随应用走。
+**决策**：引擎子进程用 Electron 内嵌 Node 运行，机制为 `ELECTRON_RUN_AS_NODE=1` + `spawn(process.execPath, ...)`——把 Electron 二进制当作普通 Node 使用，仍是独立子进程，壳与引擎的进程隔离不变（AD-2）。不额外内置官方 Node 二进制；若运行期出现原生模块 ABI 问题且 `@electron/rebuild` 无法低成本解决，切换回内置官方 Node 兜底（见下）。
+
+**已知事实与风险**：
+
+- **版本**：内嵌 Node 版本随 Electron 发布节奏走、不可独立升级。已核实（2026-08，endoflife.date）：Electron 39 = Node 22，Electron 40 起 = Node 24。dsh 引擎要求 `^22.19 || >=24`，因此**锁定 Electron ≥ 40（Node 24）**，启动时核对 `process.versions.node` 满足 engines，不满足则挡在启动前；Electron 升级换 Node major 时必须重新核对。
+- **ABI**：内嵌 Node 与官方 Node 的 `NODE_MODULE_VERSION` 不同，按官方 Node ABI 编译的原生模块（dsh 自带 Linux 的 `node-addon-landlock-run`、生产 bin 可选依赖 `node-addon-require-builtin`、第三方插件的 node-gyp 依赖）可能加载失败。对策：Phase 1 设 ABI 验证门（实际加载检查）；受影响模块用 `@electron/rebuild` 对 `resources/engine` 重编；重编不可行时启用兜底。
+- **一致性**：同一引擎在系统 Node（CLI/开发模式）与 Electron 内嵌 Node 下行为可能因 ABI 差异不一致；发布版以 Electron 内嵌 Node 为准，开发模式默认仍用系统 Node（checkout 的 `pnpm dsh`），遇 ABI 问题时再切换。
+
+**兜底路径（用户已确认）**：恢复「内置官方 Node.js 发行版二进制」（nodejs.org 构建，约 30MB，`resources/node/`），`harness.ts` 运行时选择改为「内置官方 Node → Electron 内嵌 Node」；两条路径共用同一 `resources/engine`，切换只改 spawn 的 Node 可执行文件。
 
 ### 3.5 为什么不做进程内嵌入（决策记录）
 
@@ -157,6 +164,7 @@ Electron 每个应用都内嵌完整 Node 运行时（main 进程 `process.versi
 
 - **数据安全**：升级只换引擎，`$DSH_HOME` 原样保留（上游设计保证）。
 - **引擎更新**：面板/自动检查 npm registry 最新版（对比锁定版本）→ 后台安装进 `resources/engine/` → 重启引擎。**升级前自动备份 `$DSH_HOME` 一次**（预发布期 `SESSION_FORMAT_VERSION=0` 不承诺兼容）。
+- **运行时版本联动**：Electron 升级会同时更换内嵌 Node major（39 = Node 22，40 起 = Node 24）；升级前核对引擎 engines（`^22.19 || >=24`），不满足则禁止升级（§3.4）。
 - **应用更新**：electron-updater 走 GitHub Releases（壳自身）。
 - **开发模式**：指向 checkout，`git pull` 即可，壳无感。
 
@@ -165,7 +173,7 @@ Electron 每个应用都内嵌完整 Node 运行时（main 进程 `process.versi
 ```
 dsh-desktop/
 ├─ package.json            # deps: pnpm（自带）；devDeps: electron, electron-builder, TS
-├─ electron-builder.yml    # 三平台打包配置（asarUnpack: resources/engine, resources/node）
+├─ electron-builder.yml    # 三平台打包配置（asarUnpack: resources/engine）
 ├─ .gitignore
 ├─ docs/
 │  ├─ implementation-plan.md   # 本文档
@@ -181,7 +189,7 @@ dsh-desktop/
 │  └─ renderer/
 │     └─ ...                # 极薄外壳 UI：菜单栏、插件面板、日志面板、设置
 ├─ scripts/
-│  ├─ fetch-node.ts         # 按平台下载内置 Node 二进制
+│  ├─ rebuild-engine.ts     # @electron/rebuild：引擎原生模块按 Electron ABI 重编
 │  ├─ install-engine.ts     # 在 resources/engine 安装锁定版本引擎
 │  └─ smoke.ts              # 打包产物冒烟测试（boot 引擎 + HTTP 检查）
 └─ resources/               # 运行期资源（打包时生成/下载）
@@ -200,25 +208,26 @@ dsh-desktop/
 ### Phase 1 — 引擎托管最小闭环（核心，优先做）
 
 - 任务：
-  - `harness.ts`：运行时选择（先用系统 Node ≥ 22.19 验证逻辑）→ spawn `dsh web`（随机端口）→ 解析 stdout URL 行 → BrowserWindow 加载 → 健康检查（含 `__DSH_BOOT__` 断言）。
+  - `harness.ts`：运行时选择（Electron 内嵌 Node：`ELECTRON_RUN_AS_NODE=1` + `process.execPath`；启动核对 `process.versions.node` 满足引擎 engines）→ spawn `dsh web`（随机端口）→ 解析 stdout URL 行 → BrowserWindow 加载 → 健康检查（含 `__DSH_BOOT__` 断言）。
   - 生命周期：关窗 → SIGTERM → 等待 → 强杀；退出码区分正常/异常；异常弹错误卡片 + 日志。
   - 单实例锁。
 - 交付物：可运行壳，窗口内是完整原版 web UI。
 - 验收：
   - 启动后窗口加载原版 UI，无白屏（页面含 `__DSH_BOOT__` 注入）。
   - 随机端口不与 3080 冲突；连续启动/退出 10 次无残留进程。
+  - Electron 内嵌 Node 满足引擎 engines（锁定 Electron ≥ 40 / Node 24，见 §3.4）；原生模块 ABI 加载验证通过（ABI 门）。
   - 人为制造引擎启动失败（如配置坏插件名）→ 壳展示指名错误，不自动重启。
 
 ### Phase 2 — 资源打包与发布构建
 
 - 任务：
   - `scripts/install-engine.ts`：在 `resources/engine` 用 npm 安装锁定版本 `@deepseek-ai/dsh` + `@deepseek-ai/dsh-web-frontend`（普通 node_modules 布局）。
-  - `scripts/fetch-node.ts`：按平台下载 Node 22 二进制进 `resources/node/`（mac arm64/x64、win x64、linux x64）。
+  - 原生模块 ABI：`scripts/rebuild-engine.ts` 用 `@electron/rebuild` 按当前 Electron 版本重编 `resources/engine`，冒烟验证 `node-addon-require-builtin` 等可加载（ABI 门，见 §3.4）。
   - `electron-builder.yml` 三平台配置；引擎目录 asarUnpack。
   - 壳内置 pnpm（作为依赖），`plugins.ts` 用它执行 `dsh plugin`。
   - `scripts/smoke.ts`：打包产物冒烟——boot 引擎、HTTP 200、`__DSH_BOOT__` 断言、退出清理。
 - 交付物：mac dmg / win nsis / linux AppImage。
-- 验收：三平台产物在**无系统 Node、无 pnpm** 的干净环境开箱即用；冒烟脚本通过。
+- 验收：三平台产物在**无系统 Node、无 pnpm** 的干净环境开箱即用（引擎由 Electron 内嵌 Node 运行）；冒烟脚本通过；原生模块加载无 ABI 报错。
 
 ### Phase 3 — 插件管理面板
 
@@ -260,10 +269,11 @@ dsh-desktop/
 | 上游预发布期格式不兼容（`SESSION_FORMAT_VERSION=0`） | 升级丢数据 | 升级前自动备份 `$DSH_HOME`；版本号显眼展示 |
 | 上游包未发布/发布不全（已核实：`@deepseek-ai/dsh-sdk-server` 404） | 引擎装不上 | `install-engine.ts` 先查 registry，缺失包从锁定 commit 构建 + `npm pack` 兜底（§3.3）；发布集以脚本实时查询为准 |
 | 上游 API/机制演进（reconcile、HMR、启动输出格式） | 壳解析逻辑失效 | 壳只依赖三个稳定触点：`dsh plugin` 命令、stdout URL 行、profile manifest；解析失败降级为「透传原始输出 + 日志」 |
-| Electron 与系统 Node ABI 差异 | 原生模块不可用 | 子进程 + 系统/内置 Node（AD-2）；引擎 asarUnpack |
+| Electron 内嵌 Node 与官方 Node ABI 差异 | 原生模块（landlock、`node-addon-require-builtin`）加载失败 | Phase 1 ABI 验证门；受影响包用 `@electron/rebuild` 重编；不可行则切回内置官方 Node 兜底（§3.4） |
+| Electron 升级导致内嵌 Node major 变化（39 = Node 22，40 起 = Node 24） | 引擎 engines（`^22.19 \|\| >=24`）不满足 | 锁定 Electron ≥ 40；升级前核对 `process.versions.node`，不满足则挡在升级前（§3.4） |
 | 随机端口竞态/健康检查误判 | 白屏或连错服务 | 解析 stdout URL 行为准 + 页面 `__DSH_BOOT__` 断言；启动后定期重检 |
 | pnpm 缺失 | 插件安装不可用 | 壳自带 pnpm（AD-8） |
-| 用户机器无 Node | 引擎无法启动 | 内置 Node 二进制；兜底引导安装 |
+| 用户机器无 Node | 引擎无法启动 | 已消除：运行时由 Electron 内嵌 Node 提供；内置官方 Node 兜底保留 |
 | 双实例写 `$DSH_HOME` | 数据损坏 | 单实例锁（AD-9） |
 | 引擎崩溃循环 | 无限重启 | 非 0 退出不自动重启（AD-10） |
 | 本地插件相对路径被 `anchorPathSpec` 锚错 | 装错目录 | 面板一律传绝对路径 |
@@ -281,7 +291,7 @@ dsh-desktop/
 ## 10. 待确认事项
 
 - [x] 发布版引擎来源：npm registry 主路径 + 上游构建兜底（2026-08-14 定，见 §3.3）。
-- [ ] 内置 Node 版本选定（22 LTS 具体 minor）。
+- [x] 运行时：Electron 内嵌 Node（`ELECTRON_RUN_AS_NODE=1` 派生引擎子进程）；内置官方 Node 保留为兜底（2026-08-14 定，见 §3.4）。
 - [ ] 引擎「随机端口」vs「固定端口 + 冲突检测」最终取舍（当前倾向随机端口 + 解析 stdout）。
 - [ ] 插件面板形态：独立原生窗口 vs 壳内嵌页 vs 注入 web UI（当前倾向壳内嵌页 + preload API）。
 - [ ] 自动检查更新默认开关。
