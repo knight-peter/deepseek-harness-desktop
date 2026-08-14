@@ -2,7 +2,7 @@
 
 DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口、管理插件与更新；业务功能 100% 复用上游 `dsh web` 原版，上游仓库的持续更新不影响壳。
 
-- 状态：已确认架构方向，待开工
+- 状态：Phase 0–1 实施中（2026-08-14）
 - 上游：https://github.com/deepseek-ai/deepseek-harness（下文简称「上游」）
 - 上游版本基线：checkout `0.1.0-rc.5`；npm `latest` 已到 `0.1.0-rc.6`（2026-08-14 核实）
 - 相关讨论：见本仓库 `docs/` 后续补充的设计笔记
@@ -111,7 +111,7 @@ resources/
 
 **已知事实与风险**：
 
-- **版本**：内嵌 Node 版本随 Electron 发布节奏走、不可独立升级。已核实（2026-08，endoflife.date）：Electron 39 = Node 22，Electron 40 起 = Node 24。dsh 引擎要求 `^22.19 || >=24`，因此**锁定 Electron ≥ 40（Node 24）**，启动时核对 `process.versions.node` 满足 engines，不满足则挡在启动前；Electron 升级换 Node major 时必须重新核对。
+- **版本**：内嵌 Node 版本随 Electron 发布节奏走、不可独立升级。已核实（2026-08，endoflife.date）：Electron 39 = Node 22，Electron 40 起 = Node 24。dsh 引擎要求 `^22.19 || >=24`，因此**锁定 Electron ≥ 40（Node 24，当前稳定 43.x）**，启动时核对 `process.versions.node` 满足 engines，不满足则挡在启动前；Electron 升级换 Node major 时必须重新核对。
 - **ABI**：内嵌 Node 与官方 Node 的 `NODE_MODULE_VERSION` 不同，按官方 Node ABI 编译的原生模块（dsh 自带 Linux 的 `node-addon-landlock-run`、生产 bin 可选依赖 `node-addon-require-builtin`、第三方插件的 node-gyp 依赖）可能加载失败。对策：Phase 1 设 ABI 验证门（实际加载检查）；受影响模块用 `@electron/rebuild` 对 `resources/engine` 重编；重编不可行时启用兜底。
 - **一致性**：同一引擎在系统 Node（CLI/开发模式）与 Electron 内嵌 Node 下行为可能因 ABI 差异不一致；发布版以 Electron 内嵌 Node 为准，开发模式默认仍用系统 Node（checkout 的 `pnpm dsh`），遇 ABI 问题时再切换。
 
@@ -201,7 +201,7 @@ dsh-desktop/
 
 ### Phase 0 — 仓库脚手架
 
-- 任务：electron + TypeScript 骨架；`electron-builder.yml` 最小配置；lint/format；`.gitignore`。
+- 任务：TypeScript + tsc + electron + electron-builder 骨架（渲染层极薄，不引 electron-vite/React）；eslint（typescript-eslint）；`.gitignore`；`electron-builder.yml` 最小配置。
 - 交付物：`pnpm dev` 能弹出占位窗口。
 - 验收：在干净环境执行 `pnpm install && pnpm dev` 出现窗口；`pnpm lint` 通过。
 
@@ -292,7 +292,8 @@ dsh-desktop/
 
 - [x] 发布版引擎来源：npm registry 主路径 + 上游构建兜底（2026-08-14 定，见 §3.3）。
 - [x] 运行时：Electron 内嵌 Node（`ELECTRON_RUN_AS_NODE=1` 派生引擎子进程）；内置官方 Node 保留为兜底（2026-08-14 定，见 §3.4）。
-- [ ] 引擎「随机端口」vs「固定端口 + 冲突检测」最终取舍（当前倾向随机端口 + 解析 stdout）。
-- [ ] 插件面板形态：独立原生窗口 vs 壳内嵌页 vs 注入 web UI（当前倾向壳内嵌页 + preload API）。
-- [ ] 自动检查更新默认开关。
-- [ ] 首个 release 的签名证书与发布通道（GitHub Releases）。
+- [x] 端口策略：随机端口（`--port 0`）+ 解析 stdout URL 行（2026-08-14 定）。
+- [x] 插件面板形态：壳内嵌页 + preload API（渲染层极薄、不引框架；2026-08-14 定）。
+- [x] 自动检查更新：默认关，手动检查（2026-08-14 定）。
+- [ ] 首个 release 的签名证书与发布通道（GitHub Releases）（Phase 7 前再定，不阻塞）。
+- [x] Electron 版本：锁定 43.x（Node 24；2026-08-14 当前 stable 43.4.0，见 §3.4）。
