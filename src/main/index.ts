@@ -12,11 +12,20 @@ import { join } from 'node:path'
 import { Harness, nodeSatisfiesEngine } from './harness.js'
 
 let mainWindow: BrowserWindow | null = null
+let engineUiLoaded = false
 
 const harness = new Harness({
   onStateChange: (state) => {
     console.log('[harness] state:', JSON.stringify(state))
     mainWindow?.webContents.send('harness:state', state)
+    if (state.kind === 'starting') engineUiLoaded = false
+    // The window starts on the thin status shell and navigates to the real
+    // engine UI once the health check passes (and again after a restart).
+    if (state.kind === 'running' && !engineUiLoaded && mainWindow !== null) {
+      engineUiLoaded = true
+      console.log('[shell] loading engine UI:', state.url)
+      void mainWindow.loadURL(state.url)
+    }
   },
   onLog: (line, stream) => {
     console.log(`[engine:${stream}] ${line}`)
