@@ -1,0 +1,275 @@
+# dsh-desktop 实施计划
+
+DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口、管理插件与更新；业务功能 100% 复用上游 `dsh web` 原版，上游仓库的持续更新不影响壳。
+
+- 状态：已确认架构方向，待开工
+- 上游：https://github.com/deepseek-ai/deepseek-harness（下文简称「上游」）
+- 上游版本基线：`0.1.0-rc.5`（npm 公开包）
+- 相关讨论：见本仓库 `docs/` 后续补充的设计笔记
+
+## 1. 背景与目标
+
+### 1.1 背景
+
+- deepseek-harness 是通过 Web UI 使用的 agent harness，`dsh web` 启动一个 Node 宿主进程，内置 HTTP 服务器（默认 `127.0.0.1:3080`），向 index.html 注入 `window.__DSH_BOOT__` 入口图后，浏览器壳才挂载整个客户端。**Web UI 不是独立前端，必须由宿主进程承载。**
+- 上游仓库持续更新，且处于预发布期（`0.1.0-rc.5`），磁盘格式不承诺兼容。
+- 需要为桌面用户提供一个零依赖、开箱即用的窗口形态，并保留方便的插件开发/调试/安装路径。
+
+### 1.2 目标
+
+1. 用 Electron 做窗口壳，托管 `dsh web` 子进程，复用 100% 原功能，上游零改动。
+2. 上游更新不影响壳：壳依赖 npm 发布版，与源码解耦；同时支持「开发模式」直接托管源码 checkout。
+3. 内置 Node 运行时，用户零依赖。
+4. 提供方便的插件安装、开发、调试体验。
+
+### 1.3 非目标（刻意不做）
+
+- 不实现插件加载/注册逻辑、不管理 profile bundles 列表、不实现 HMR —— 上游均有成熟实现，壳只做「调命令、捕获输出、解析状态、编排重启、展示」。
+- 不做「Electron 进程内嵌入 dsh」（原因见 §3.4）。
+- 不 fork 上游前端。
+
+## 2. 已确认的架构决策
+
+| 编号 | 决策 | 理由 |
+|---|---|---|
+| AD-1 | 独立仓库 `~/Learn/dsh-desktop`，不放进上游仓库 | 上游持续更新，壳与源码彻底解耦；合并/更新互不干扰 |
+| AD-2 | Electron 只做窗口壳；引擎是壳托管的 `dsh web` 子进程；BrowserWindow 加载 `http://127.0.0.1:<随机端口>` | 复用原版 UI 零改动；进程隔离；原生模块按系统 Node ABI 编译，避开 Electron ABI 问题 |
+| AD-3 | 发布版引擎用 npm 公开包 `@deepseek-ai/dsh` + `@deepseek-ai/dsh-web-frontend`，锁版本安装在壳的 `resources/` 独立安装区 | 开箱即用、版本可控、升级只换引擎 |
+| AD-4 | 发布版内置 Node 二进制（Node ≥ 22.19，满足上游 `^22.19 \|\| >=24` 引擎要求） | 用户零依赖；无法检测到时引导安装 |
+| AD-5 | 用户数据全部留在 `$DSH_HOME`（默认 `~/.dsh`），壳不迁移、不接管 | 与上游 CLI 共享数据，升级只换引擎 |
+| AD-6 | 插件安装/卸载/更新一律走上游 `dsh plugin --profile web <pnpm args>`，壳只编排重启 | 上游已实现 pnpm 安装 + bundles reconcile，壳不重复造轮子 |
+| AD-7 | 结构变更（装/卸/更新插件）后自动重启引擎；配置变更走 profile patch HMR 热生效 | web profile 的 HMR 是配置级的，新行不一定能热挂载，而引擎 boot 仅数秒 |
+| AD-8 | 发布版附带 pnpm（作为壳的依赖，用内置 Node 调用），不要求用户系统安装 pnpm | `dsh plugin` 依赖 PATH 上的 pnpm，零依赖目标要求壳自带 |
+| AD-9 | 单实例锁（Electron `requestSingleInstanceLock`） | 两个壳同时写 `$DSH_HOME` 会冲突 |
+| AD-10 | 引擎异常退出（非 0 退出码）时壳不自动重启，弹错误诊断 | 防止崩溃死循环 |
+
+## 3. 总体架构
+
+### 3.1 运行时拓扑
+
+```
+┌───────────────────────────── dsh-desktop (Electron) ─────────────────────────────┐
+│                                                                                  │
+│  Main 进程                                                                       │
+│  ├─ harness.ts    引擎子进程管理：选 Node → spawn dsh web → 解析 stdout URL 行    │
+│  │                → 健康检查 → 优雅停机（SIGTERM → 等待 → 强杀）                  │
+│  ├─ plugins.ts    插件管理：调 dsh plugin 命令、解析输出、编排重启                │
+│  ├─ updater.ts    引擎版本检查/升级 + electron-updater 应用更新                  │
+│  └─ index.ts      生命周期、单实例锁、托盘、窗口                                 │
+│         │                                                                        │
+│         │ spawn（内置 Node 或系统 Node ≥22.19）                                  │
+│         ▼                                                                        │
+│  ┌─────────────────────────── dsh web（子进程）──────────────────────────┐      │
+│  │  Node 宿主：web profile（$DSH_HOME/profiles/web）                      │      │
+│  │  bundles: dsh-base + dsh-web-app + 用户插件分层                         │      │
+│  │  HTTP 服务器 127.0.0.1:<port>（随机端口）                               │      │
+│  │  └─ 注入 window.__DSH_BOOT__ → 服务 /api、/plugins/<id>/client.js      │      │
+│  └───────────────────────────────────────────────────────────────────────┘      │
+│         │ http://127.0.0.1:<port>                                                │
+│         ▼                                                                        │
+│  BrowserWindow（contextIsolation: true, nodeIntegration: false）                 │
+│  └─ preload contextBridge：harness 状态 / 插件管理 API / 版本信息                 │
+└──────────────────────────────────────────────────────────────────────────────────┘
+
+用户数据（引擎读写，壳不接管）：$DSH_HOME
+├─ profiles/web/         profile 目录：package.json（deps + dsh.profile.bundles）、
+│                        cordis.patch.yml、pnpm-workspace.yaml
+├─ cordis.patch.yml      home 级用户补丁层
+├─ storages/ sessions/ credentials/ settings/ ... 会话与设置数据
+└─ .agent-presets/       每会话 agent 组合
+```
+
+### 3.2 引擎托管（harness.ts）关键点
+
+1. **运行时选择**：优先内置 Node 二进制（`resources/node/`）；否则检测系统 `node` ≥ 22.19；都没有则引导安装。
+2. **启动**：`<node> <resources>/engine/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --port 0`（随机端口），监听 stdout，匹配 `dsh web: http://127.0.0.1:<port>` 行（上游启动时打印 URL）拿到真实端口；就绪后 BrowserWindow 加载。
+3. **健康检查**：端口可连 + `GET /` 返回 200 且页面包含 `__DSH_BOOT__` 注入脚本（生产模式禁止加载裸 Vite/静态页）。
+4. **优雅停机**：关窗 → 向引擎发 SIGTERM → 等待退出（上限 N 秒）→ 超时强杀；退出码 0 视为正常关闭静默处理，非 0 弹错误诊断（AD-10）。
+5. **启动失败诊断**：上游 `assertEntriesLoaded/Activated` 会把解析不到的插件变成启动失败并指名插件名，`installFailLoud` 输出一行带标签的 stderr 后 `exit(1)`；壳解析 stderr → 渲染友好错误卡片（「插件 X 未找到」等），附完整日志。
+
+### 3.3 资源布局（发布版）
+
+```
+resources/
+├─ node/                内置 Node 二进制（按平台 CI 下载，见 Phase 2）
+└─ engine/              dsh 引擎独立安装区
+   └─ node_modules/     @deepseek-ai/dsh、@deepseek-ai/dsh-web-frontend 及其依赖
+                        （npm 安装，普通布局；不用 pnpm 隔离布局）
+```
+
+**关键约束**：上游 `dsh-web-app` 通过 `require.resolve('@deepseek-ai/dsh-web-frontend/dist/index.html')` 定位前端 dist，因此 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-web-frontend` 必须装在同一棵 `node_modules` 树中。引擎目录整体 `asarUnpack`（原生模块 + require.resolve 需要真实文件路径）。
+
+### 3.4 为什么不做进程内嵌入（决策记录）
+
+在 Electron main 里直接 import 并 `boot()` dsh 能拿到 service 级集成，但代价：Electron 的 Node ABI 与系统 Node 不同，原生模块（`node-addon-landlock-run` 等）需 electron-rebuild；生命周期与进程模型耦合；升级要跟着 Electron 重编。当前收益低——需要原生能力的地方上游 host 侧已有（如 `dsh-host-directory-picker-native` 原生目录选择器）。**先子进程方案；未来若需托盘/菜单直连 service，再评估 SDK（`@deepseek-ai/dsh-sdk`，stdio JSON-RPC 驱动运行时）作为桥。**
+
+## 4. 插件设计（开发 / 调试 / 安装）
+
+### 4.1 三类改动面，生效机制不同
+
+| 改动面 | 典型内容 | 生效方式 | 需重启？ |
+|---|---|---|---|
+| 配置层 | `cordis.patch.yml` 改配置、启停已有行 | profile patch HMR（`watchUserPatches` 事务式重组） | 否（热生效） |
+| 宿主插件 | 工具、服务、事件监听（Node 进程内） | 代码改动 | 是（boot 数秒，代价小） |
+| 客户端插件 | `dsh.client` 浏览器半（UI 组件） | 重建 bundle；开发模式（`pnpm run dev:web` watcher）下走 client-hmr 链（SSE `/plugins/events` → invalidate → prefetch → refresh） | 开发模式否；发布模式重启+刷新 |
+
+### 4.2 安装（面板三条路径）
+
+| 路径 | 面板操作 | 底层命令 | 特殊处理 |
+|---|---|---|---|
+| npm registry | 搜索/输入包名，可锁版本 | `dsh plugin --profile web add <pkg>[@ver]` | 装完自动重启引擎；透传 pnpm 输出 |
+| 本地源码 | 选择 `$DSH_HOME/plugins-local/<name>/` 目录 | `dsh plugin --profile web add file:<绝对路径>` | 必须绝对路径（上游 `anchorPathSpec` 会把相对路径锚到调用 cwd）；file: 为符号链接，重构建后生效 |
+| git 仓库 | 粘贴 git URL | `dsh plugin --profile web add git+https://...` | pnpm ≥10 拦 prepare 脚本：把上游提示转成引导卡片 +「打开 pnpm-workspace.yaml 编辑 allowBuilds」 |
+
+卸载/更新 = `dsh plugin --profile web remove|update <pkg>`。注册动作（reconcile `dsh.profile.bundles`）全部由上游完成，壳只读回 profile manifest 展示状态。
+
+### 4.3 调试
+
+- **日志面板**：捕获引擎 stdout/stderr，tail / 过滤 / 导出。启动失败行、pnpm 输出都在里面。
+- **启动失败诊断**：解析 stderr → 友好错误卡片（unresolved plugin 指名、pnpm 失败原因）；不自动重启（AD-10）。
+- **配置树视图**：面板内只读展示 `dsh --profile web --dump-config` 结果，支持「装插件前/后 diff」，定位「为什么没生效」。
+- **宿主插件迭代**：改代码 → 面板「重新加载引擎」→ 看日志。
+- **断点调试（高级）**：以 `NODE_OPTIONS=--inspect=9229` 启动引擎，Chrome DevTools attach；壳只透传 env，零侵入。
+- **客户端插件迭代**：开发模式 + `dev:web` 热重载；已知限制如实展示（热重载丢组件内 React state、失败无回滚，FAILED 状态在设置页插件清单可见）。
+- **配置热更**：壳内置 patch 编辑器（保存前用上游 parser 校验），配置改动 HMR 热生效；结构性改动（增删行/新插件）提示「需要重启」，面板一键重启。
+- **web UI 自带面**：设置页的插件清单（`plugin-inventory`，Loader 条目只读投影）与插件配置卡片（`ui-settings-plugins`）已存在；壳面板与其互补：UI 看状态，壳做安装/卸载/更新/重启动作。
+
+### 4.4 插件作者工作流（端到端）
+
+1. 脚手架：面板「新建插件」→ 生成模板（`package.json` 声明 `dsh.bundle`/`dsh.client` + `cordis.patch.yml` + 入口）。
+2. 挂载：模板放 `$DSH_HOME/plugins-local/` → 面板一键安装（file: 链接）→ 自动重启。
+3. 迭代：宿主插件改代码 → 重启引擎 → 看日志；前端插件开发模式 HMR；配置走 patch 热更。
+4. 验证：设置页插件清单（行已挂载）+ 日志无报错 + `--dump-config` 树确认分层位置。
+5. 发布：`npm publish` → 用户面板搜索安装。
+
+## 5. 更新策略
+
+- **数据安全**：升级只换引擎，`$DSH_HOME` 原样保留（上游设计保证）。
+- **引擎更新**：面板/自动检查 npm registry 最新版（对比锁定版本）→ 后台安装进 `resources/engine/` → 重启引擎。**升级前自动备份 `$DSH_HOME` 一次**（预发布期 `SESSION_FORMAT_VERSION=0` 不承诺兼容）。
+- **应用更新**：electron-updater 走 GitHub Releases（壳自身）。
+- **开发模式**：指向 checkout，`git pull` 即可，壳无感。
+
+## 6. 仓库结构
+
+```
+dsh-desktop/
+├─ package.json            # deps: pnpm（自带）；devDeps: electron, electron-builder, TS
+├─ electron-builder.yml    # 三平台打包配置（asarUnpack: resources/engine, resources/node）
+├─ .gitignore
+├─ docs/
+│  ├─ implementation-plan.md   # 本文档
+│  └─ ...                       # 后续设计笔记
+├─ src/
+│  ├─ main/
+│  │  ├─ index.ts           # 生命周期、单实例锁、托盘、窗口
+│  │  ├─ harness.ts         # 引擎子进程管理（§3.2）
+│  │  ├─ plugins.ts         # 插件管理后端（§4）
+│  │  └─ updater.ts         # 更新（§5）
+│  ├─ preload/
+│  │  └─ index.ts           # contextBridge API
+│  └─ renderer/
+│     └─ ...                # 极薄外壳 UI：菜单栏、插件面板、日志面板、设置
+├─ scripts/
+│  ├─ fetch-node.ts         # 按平台下载内置 Node 二进制
+│  ├─ install-engine.ts     # 在 resources/engine 安装锁定版本引擎
+│  └─ smoke.ts              # 打包产物冒烟测试（boot 引擎 + HTTP 检查）
+└─ resources/               # 运行期资源（打包时生成/下载）
+```
+
+## 7. 实施阶段
+
+每个阶段的验收标准必须可执行验证；除 Phase 0 外均基于前一阶段产物。
+
+### Phase 0 — 仓库脚手架
+
+- 任务：electron + TypeScript 骨架；`electron-builder.yml` 最小配置；lint/format；`.gitignore`。
+- 交付物：`pnpm dev` 能弹出占位窗口。
+- 验收：在干净环境执行 `pnpm install && pnpm dev` 出现窗口；`pnpm lint` 通过。
+
+### Phase 1 — 引擎托管最小闭环（核心，优先做）
+
+- 任务：
+  - `harness.ts`：运行时选择（先用系统 Node ≥ 22.19 验证逻辑）→ spawn `dsh web`（随机端口）→ 解析 stdout URL 行 → BrowserWindow 加载 → 健康检查（含 `__DSH_BOOT__` 断言）。
+  - 生命周期：关窗 → SIGTERM → 等待 → 强杀；退出码区分正常/异常；异常弹错误卡片 + 日志。
+  - 单实例锁。
+- 交付物：可运行壳，窗口内是完整原版 web UI。
+- 验收：
+  - 启动后窗口加载原版 UI，无白屏（页面含 `__DSH_BOOT__` 注入）。
+  - 随机端口不与 3080 冲突；连续启动/退出 10 次无残留进程。
+  - 人为制造引擎启动失败（如配置坏插件名）→ 壳展示指名错误，不自动重启。
+
+### Phase 2 — 资源打包与发布构建
+
+- 任务：
+  - `scripts/install-engine.ts`：在 `resources/engine` 用 npm 安装锁定版本 `@deepseek-ai/dsh` + `@deepseek-ai/dsh-web-frontend`（普通 node_modules 布局）。
+  - `scripts/fetch-node.ts`：按平台下载 Node 22 二进制进 `resources/node/`（mac arm64/x64、win x64、linux x64）。
+  - `electron-builder.yml` 三平台配置；引擎目录 asarUnpack。
+  - 壳内置 pnpm（作为依赖），`plugins.ts` 用它执行 `dsh plugin`。
+  - `scripts/smoke.ts`：打包产物冒烟——boot 引擎、HTTP 200、`__DSH_BOOT__` 断言、退出清理。
+- 交付物：mac dmg / win nsis / linux AppImage。
+- 验收：三平台产物在**无系统 Node、无 pnpm** 的干净环境开箱即用；冒烟脚本通过。
+
+### Phase 3 — 插件管理面板
+
+- 任务：
+  - `plugins.ts` 后端：执行 `dsh plugin --profile web add|remove|update <pkg>`，解析输出与退出码；读 profile manifest 展示已装列表/版本。
+  - preload API + 渲染层：搜索安装（npm）、本地目录安装（`plugins-local/` file: 链接）、git URL 安装（含 allowBuilds 引导卡片）、卸载/更新；装完自动重启引擎。
+  - 启停/配置：写 profile `cordis.patch.yml`（校验后），配置改动热生效；结构性改动提示重启。
+- 交付物：可用的插件管理界面。
+- 验收：安装一个真实 bundle 插件 → 自动重启 → 设置页插件清单出现该行；卸载后分层移除；本地 file: 插件改代码重构建后重启即生效。
+
+### Phase 4 — 调试与日志体验
+
+- 任务：日志面板（tail/过滤/导出）；启动失败友好诊断；`--dump-config` 只读视图 + diff；「重新加载引擎」；`NODE_OPTIONS=--inspect` 高级模式；patch 编辑器。
+- 交付物：调试工具集。
+- 验收：坏插件安装 → 错误卡片指名插件；dump-config 视图与 `dsh --profile web --dump-config` 输出一致；配置热更演示（改 patch 不重启即生效）。
+
+### Phase 5 — 更新机制
+
+- 任务：npm registry 版本检查；升级前 `$DSH_HOME` 备份；引擎后台升级 + 重启；electron-updater 应用更新；版本信息展示。
+- 交付物：自动/手动更新。
+- 验收：引擎升级后 `$DSH_HOME` 数据（会话、设置、凭据）完整保留；备份可回滚；模拟升级失败不破坏旧引擎。
+
+### Phase 6 — 开发模式
+
+- 任务：设置项「使用源码目录」→ `harness.ts` 改为在 checkout 里跑 `pnpm dsh --profile web`；可选 `pnpm run dev:web` 前端 HMR；源码插件工作流（workspace 挂载）；模式切换确认与路径展示。
+- 交付物：开发模式。
+- 验收：指向 deepseek-harness checkout 后正常出窗；`dev:web` 下改客户端插件代码热重载；切回发布模式正常。
+
+### Phase 7 — 发布与文档
+
+- 任务：CI（构建 + smoke）；代码签名（mac notarize / win signtool）；用户文档 + 插件作者文档；首个 release。
+- 交付物：正式发布通道。
+- 验收：CI 绿；签名通过系统校验（Gatekeeper/SmartScreen 策略内）；文档覆盖安装、插件、更新、故障排查。
+
+## 8. 风险与对策
+
+| 风险 | 影响 | 对策 |
+|---|---|---|
+| 上游预发布期格式不兼容（`SESSION_FORMAT_VERSION=0`） | 升级丢数据 | 升级前自动备份 `$DSH_HOME`；版本号显眼展示 |
+| 上游 API/机制演进（reconcile、HMR、启动输出格式） | 壳解析逻辑失效 | 壳只依赖三个稳定触点：`dsh plugin` 命令、stdout URL 行、profile manifest；解析失败降级为「透传原始输出 + 日志」 |
+| Electron 与系统 Node ABI 差异 | 原生模块不可用 | 子进程 + 系统/内置 Node（AD-2）；引擎 asarUnpack |
+| 随机端口竞态/健康检查误判 | 白屏或连错服务 | 解析 stdout URL 行为准 + 页面 `__DSH_BOOT__` 断言；启动后定期重检 |
+| pnpm 缺失 | 插件安装不可用 | 壳自带 pnpm（AD-8） |
+| 用户机器无 Node | 引擎无法启动 | 内置 Node 二进制；兜底引导安装 |
+| 双实例写 `$DSH_HOME` | 数据损坏 | 单实例锁（AD-9） |
+| 引擎崩溃循环 | 无限重启 | 非 0 退出不自动重启（AD-10） |
+| 本地插件相对路径被 `anchorPathSpec` 锚错 | 装错目录 | 面板一律传绝对路径 |
+| git 插件 prepare 被 pnpm 拦截 | 安装失败 | allowBuilds 引导卡片（§4.2） |
+
+## 9. 里程碑（粗略）
+
+| 里程碑 | 内容 | 预估 |
+|---|---|---|
+| M1 | Phase 0–1：可运行壳 | 0.5–1 周 |
+| M2 | Phase 2–3：打包 + 插件管理 | 1–2 周 |
+| M3 | Phase 4–5：调试体验 + 更新 | 1 周 |
+| M4 | Phase 6–7：开发模式 + 发布 | 1 周 |
+
+## 10. 待确认事项
+
+- [ ] 内置 Node 版本选定（22 LTS 具体 minor）。
+- [ ] 引擎「随机端口」vs「固定端口 + 冲突检测」最终取舍（当前倾向随机端口 + 解析 stdout）。
+- [ ] 插件面板形态：独立原生窗口 vs 壳内嵌页 vs 注入 web UI（当前倾向壳内嵌页 + preload API）。
+- [ ] 自动检查更新默认开关。
+- [ ] 首个 release 的签名证书与发布通道（GitHub Releases）。

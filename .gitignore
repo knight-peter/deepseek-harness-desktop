@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+
+# build outputs
+dist/
+out/
+release/
+
+# electron-builder
+*.dmg
+*.exe
+*.AppImage
+*.blockmap
+*.yml.bak
+
+# resources generated at build time
+resources/node/
+resources/engine/
+
+# logs
+*.log
+npm-debug.log*
+
+# editor / OS
+.DS_Store
+.vscode/
+.idea/
