@@ -4,7 +4,7 @@ DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口�
 
 - 状态：已确认架构方向，待开工
 - 上游：https://github.com/deepseek-ai/deepseek-harness（下文简称「上游」）
-- 上游版本基线：`0.1.0-rc.5`（npm 公开包）
+- 上游版本基线：checkout `0.1.0-rc.5`；npm `latest` 已到 `0.1.0-rc.6`（2026-08-14 核实）
 - 相关讨论：见本仓库 `docs/` 后续补充的设计笔记
 
 ## 1. 背景与目标
@@ -25,7 +25,7 @@ DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口�
 ### 1.3 非目标（刻意不做）
 
 - 不实现插件加载/注册逻辑、不管理 profile bundles 列表、不实现 HMR —— 上游均有成熟实现，壳只做「调命令、捕获输出、解析状态、编排重启、展示」。
-- 不做「Electron 进程内嵌入 dsh」（原因见 §3.4）。
+- 不做「Electron 进程内嵌入 dsh」（原因见 §3.5）。
 - 不 fork 上游前端。
 
 ## 2. 已确认的架构决策
@@ -34,8 +34,8 @@ DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口�
 |---|---|---|
 | AD-1 | 独立仓库 `~/Learn/dsh-desktop`，不放进上游仓库 | 上游持续更新，壳与源码彻底解耦；合并/更新互不干扰 |
 | AD-2 | Electron 只做窗口壳；引擎是壳托管的 `dsh web` 子进程；BrowserWindow 加载 `http://127.0.0.1:<随机端口>` | 复用原版 UI 零改动；进程隔离；原生模块按系统 Node ABI 编译，避开 Electron ABI 问题 |
-| AD-3 | 发布版引擎用 npm 公开包 `@deepseek-ai/dsh` + `@deepseek-ai/dsh-web-frontend`，锁版本安装在壳的 `resources/` 独立安装区 | 开箱即用、版本可控、升级只换引擎 |
-| AD-4 | 发布版内置 Node 二进制（Node ≥ 22.19，满足上游 `^22.19 \|\| >=24` 引擎要求） | 用户零依赖；无法检测到时引导安装 |
+| AD-3 | 发布版引擎用 npm 发布包 `@deepseek-ai/dsh` + `@deepseek-ai/dsh-web-frontend`，锁版本装在壳的 `resources/engine` 独立安装区；上游未发布/发布不全的包退化为「锁定上游 commit 构建 + `npm pack` tarball」安装（见 §3.3） | 开箱即用、版本可控、升级只换引擎；不依赖上游发布节奏 |
+| AD-4 | 发布版内置**官方 Node.js 发行版**二进制（Node 22 LTS，满足上游 `^22.19 \|\| >=24` 引擎要求） | 用户零依赖；引擎是 Node 程序，运行时必须随应用走；Electron 内嵌 Node 因 ABI 与版本不可控不作主路径（见 §3.4）；无法检测到时引导安装 |
 | AD-5 | 用户数据全部留在 `$DSH_HOME`（默认 `~/.dsh`），壳不迁移、不接管 | 与上游 CLI 共享数据，升级只换引擎 |
 | AD-6 | 插件安装/卸载/更新一律走上游 `dsh plugin --profile web <pnpm args>`，壳只编排重启 | 上游已实现 pnpm 安装 + bundles reconcile，壳不重复造轮子 |
 | AD-7 | 结构变更（装/卸/更新插件）后自动重启引擎；配置变更走 profile patch HMR 热生效 | web profile 的 HMR 是配置级的，新行不一定能热挂载，而引擎 boot 仅数秒 |
@@ -99,7 +99,18 @@ resources/
 
 **关键约束**：上游 `dsh-web-app` 通过 `require.resolve('@deepseek-ai/dsh-web-frontend/dist/index.html')` 定位前端 dist，因此 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-web-frontend` 必须装在同一棵 `node_modules` 树中。引擎目录整体 `asarUnpack`（原生模块 + require.resolve 需要真实文件路径）。
 
-### 3.4 为什么不做进程内嵌入（决策记录）
+**引擎来源（两条路径，共用同一 `resources/engine` 布局）**：
+
+1. **npm registry（主路径）**：`npm install @deepseek-ai/dsh@<锁定版本> @deepseek-ai/dsh-web-frontend@<锁定版本>`。已核实（2026-08-14，registry.npmjs.org）：`@deepseek-ai/dsh` 存在且为公开包，首次发布 2026-08-10，`dist-tags.latest`/`next` 均为 `0.1.0-rc.6`（比当前 checkout 的 `0.1.0-rc.5` 更新）；`@deepseek-ai/dsh-web-frontend`、`dsh-web-app`、`dsh-base`、`dsh-host-webserver` 等关键依赖均存在。registry 包内容即上游 build 产物（`lib/` + `dist/`）——发布版引擎**不是**手动拷贝 dist，而是由 npm 按依赖图搬运同一批产物。
+2. **上游构建兜底**：并非全部包都已发布（已核实 `@deepseek-ai/dsh-sdk-server` 404，发布集随时间变化）。所需包缺失时：锁定上游 commit → `pnpm install && pnpm build` → 对缺失包 `npm pack` 打成 tarball → `npm install <tarball>` 进同一 `resources/engine`。内容等价于路径 1，仅搬运来源不同。
+
+两条路径运行时无感；`scripts/install-engine.ts` 统一实现「先查 registry，缺失则走构建兜底」。
+
+### 3.4 为什么不用 Electron 自带的 Node（FAQ）
+
+Electron 每个应用都内嵌完整 Node 运行时（main 进程 `process.versions.node` 可见），但那是「Electron 版 Node」，不是官方 Node：ABI（`NODE_MODULE_VERSION`）不同，版本随 Electron 发布节奏走、不可独立升级。已核实（2026-08，endoflife.date）：Electron 39 = Node 22，Electron 40 起 = Node 24；dsh 引擎要求 `^22.19 || >=24`，当前 Electron 恰好满足，但每次 Electron 跨 major 都要重新核对，且无法锁定引擎需要的 Node 小版本。引擎及其插件生态按官方 Node ABI 工作：dsh 自带 Linux 原生插件 `node-addon-landlock-run`，生产 bin 依赖可选原生 helper `node-addon-require-builtin`，第三方插件也可能带 node-gyp 依赖——按 Electron ABI 重编（electron-rebuild）会与「同一套引擎在 CLI/系统 Node 下运行」的目标冲突。因此「内置 Node」内置的是官方 Node.js 发行版二进制（nodejs.org 构建，约 30MB），引擎子进程跑在官方 Node 上：原生模块零重编、Node 版本可独立锁定与升级、与上游 CLI 场景行为一致。Electron 的 Node（`ELECTRON_RUN_AS_NODE=1`）仅保留为内置二进制缺失时的兜底候选，不作主路径。内置 Node 的决策与引擎代码如何进入 `resources/engine`（registry 包或构建产物）无关——引擎是 Node 程序，任何形态下运行时都必须随应用走。
+
+### 3.5 为什么不做进程内嵌入（决策记录）
 
 在 Electron main 里直接 import 并 `boot()` dsh 能拿到 service 级集成，但代价：Electron 的 Node ABI 与系统 Node 不同，原生模块（`node-addon-landlock-run` 等）需 electron-rebuild；生命周期与进程模型耦合；升级要跟着 Electron 重编。当前收益低——需要原生能力的地方上游 host 侧已有（如 `dsh-host-directory-picker-native` 原生目录选择器）。**先子进程方案；未来若需托盘/菜单直连 service，再评估 SDK（`@deepseek-ai/dsh-sdk`，stdio JSON-RPC 驱动运行时）作为桥。**
 
@@ -247,6 +258,7 @@ dsh-desktop/
 | 风险 | 影响 | 对策 |
 |---|---|---|
 | 上游预发布期格式不兼容（`SESSION_FORMAT_VERSION=0`） | 升级丢数据 | 升级前自动备份 `$DSH_HOME`；版本号显眼展示 |
+| 上游包未发布/发布不全（已核实：`@deepseek-ai/dsh-sdk-server` 404） | 引擎装不上 | `install-engine.ts` 先查 registry，缺失包从锁定 commit 构建 + `npm pack` 兜底（§3.3）；发布集以脚本实时查询为准 |
 | 上游 API/机制演进（reconcile、HMR、启动输出格式） | 壳解析逻辑失效 | 壳只依赖三个稳定触点：`dsh plugin` 命令、stdout URL 行、profile manifest；解析失败降级为「透传原始输出 + 日志」 |
 | Electron 与系统 Node ABI 差异 | 原生模块不可用 | 子进程 + 系统/内置 Node（AD-2）；引擎 asarUnpack |
 | 随机端口竞态/健康检查误判 | 白屏或连错服务 | 解析 stdout URL 行为准 + 页面 `__DSH_BOOT__` 断言；启动后定期重检 |
@@ -268,6 +280,7 @@ dsh-desktop/
 
 ## 10. 待确认事项
 
+- [x] 发布版引擎来源：npm registry 主路径 + 上游构建兜底（2026-08-14 定，见 §3.3）。
 - [ ] 内置 Node 版本选定（22 LTS 具体 minor）。
 - [ ] 引擎「随机端口」vs「固定端口 + 冲突检测」最终取舍（当前倾向随机端口 + 解析 stdout）。
 - [ ] 插件面板形态：独立原生窗口 vs 壳内嵌页 vs 注入 web UI（当前倾向壳内嵌页 + preload API）。
