@@ -1,0 +1,25 @@
+# dsh-desktop packaging: three-platform targets; the engine and (fallback)
+# bundled Node live under resources/ and must stay unpacked for real file
+# paths (require.resolve + native addons).
+appId: ai.deepseek.dshdesktop
+productName: dsh-desktop
+directories:
+  output: release
+files:
+  - dist/**/*
+  - package.json
+asarUnpack:
+  - resources/engine/**
+  - resources/node/**
+npmRebuild: false
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+win:
+  target:
+    - nsis
+linux:
+  target:
+    - AppImage
+  category: Development

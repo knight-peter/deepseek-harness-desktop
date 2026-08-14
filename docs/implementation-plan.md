@@ -82,7 +82,7 @@ DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口�
 ### 3.2 引擎托管（harness.ts）关键点
 
 1. **运行时选择**：默认用 Electron 内嵌 Node（`ELECTRON_RUN_AS_NODE=1` + `process.execPath` 派生引擎子进程）；启动时核对 `process.versions.node` 满足引擎 engines（`^22.19 || >=24`，锁定 Electron ≥ 40 即 Node 24）；兜底方案启用时切换为内置官方 Node（§3.4）。
-2. **启动**：以 `ELECTRON_RUN_AS_NODE=1` 用 `process.execPath` 派生 `<node>`，执行 `<resources>/engine/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --port 0`（随机端口），监听 stdout，匹配 `dsh web: http://127.0.0.1:<port>` 行（上游启动时打印 URL）拿到真实端口；就绪后 BrowserWindow 加载。
+2. **启动**：以 `ELECTRON_RUN_AS_NODE=1` 用 `process.execPath` 派生 `<node>`，**前置 `--expose-internals`**（原因见 §3.4 实测发现），执行 `<resources>/engine/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --port 0`（随机端口），监听 stdout，匹配 `dsh web: http://127.0.0.1:<port>` 行（上游启动时打印 URL）拿到真实端口；就绪后 BrowserWindow 加载。
 3. **健康检查**：端口可连 + `GET /` 返回 200 且页面包含 `__DSH_BOOT__` 注入脚本（生产模式禁止加载裸 Vite/静态页）。
 4. **优雅停机**：关窗 → 向引擎发 SIGTERM → 等待退出（上限 N 秒）→ 超时强杀；退出码 0 视为正常关闭静默处理，非 0 弹错误诊断（AD-10）。
 5. **启动失败诊断**：上游 `assertEntriesLoaded/Activated` 会把解析不到的插件变成启动失败并指名插件名，`installFailLoud` 输出一行带标签的 stderr 后 `exit(1)`；壳解析 stderr → 渲染友好错误卡片（「插件 X 未找到」等），附完整日志。
@@ -113,6 +113,7 @@ resources/
 
 - **版本**：内嵌 Node 版本随 Electron 发布节奏走、不可独立升级。已核实（2026-08，endoflife.date）：Electron 39 = Node 22，Electron 40 起 = Node 24。dsh 引擎要求 `^22.19 || >=24`，因此**锁定 Electron ≥ 40（Node 24，当前稳定 43.x）**，启动时核对 `process.versions.node` 满足 engines，不满足则挡在启动前；Electron 升级换 Node major 时必须重新核对。
 - **ABI**：内嵌 Node 与官方 Node 的 `NODE_MODULE_VERSION` 不同，按官方 Node ABI 编译的原生模块（dsh 自带 Linux 的 `node-addon-landlock-run`、生产 bin 可选依赖 `node-addon-require-builtin`、第三方插件的 node-gyp 依赖）可能加载失败。对策：Phase 1 设 ABI 验证门（实际加载检查）；受影响模块用 `@electron/rebuild` 对 `resources/engine` 重编；重编不可行时启用兜底。
+- **实测发现（2026-08-14，Electron 43 / 内嵌 Node 24.18.1）**：原生模块本身可加载（N-API prebuilt，ABI 兼容）；但 **vendored loader 的原生 internals 钩子（node-addon-require-builtin）在 Electron 内嵌 Node 下静默失效**，导致裸插件包名（如 `@deepseek-ai/cordis-plugin-timer`）解析失败、引擎 boot 报 `ERR_MODULE_NOT_FOUND`。**修复：引擎子进程前置 `--expose-internals` 启动**，loader 检测到该 execArg 后走纯 `require` 回退路径（不依赖原生钩子）；已实测引擎在 `--expose-internals` 下正常 boot 并服务页面。
 - **一致性**：同一引擎在系统 Node（CLI/开发模式）与 Electron 内嵌 Node 下行为可能因 ABI 差异不一致；发布版以 Electron 内嵌 Node 为准，开发模式默认仍用系统 Node（checkout 的 `pnpm dsh`），遇 ABI 问题时再切换。
 
 **兜底路径（用户已确认）**：恢复「内置官方 Node.js 发行版二进制」（nodejs.org 构建，约 30MB，`resources/node/`），`harness.ts` 运行时选择改为「内置官方 Node → Electron 内嵌 Node」；两条路径共用同一 `resources/engine`，切换只改 spawn 的 Node 可执行文件。
@@ -215,7 +216,7 @@ dsh-desktop/
 - 验收：
   - 启动后窗口加载原版 UI，无白屏（页面含 `__DSH_BOOT__` 注入）。
   - 随机端口不与 3080 冲突；连续启动/退出 10 次无残留进程。
-  - Electron 内嵌 Node 满足引擎 engines（锁定 Electron ≥ 40 / Node 24，见 §3.4）；原生模块 ABI 加载验证通过（ABI 门）。
+  - Electron 内嵌 Node 满足引擎 engines（Electron 43 / Node 24.18.1）；原生模块 ABI 加载验证通过（ABI 门）；`--expose-internals` 修复后引擎 boot、URL 解析、`__DSH_BOOT__` 健康检查、SIGTERM 优雅退出零残留——全部实测通过（2026-08-14）。
   - 人为制造引擎启动失败（如配置坏插件名）→ 壳展示指名错误，不自动重启。
 
 ### Phase 2 — 资源打包与发布构建
@@ -270,6 +271,7 @@ dsh-desktop/
 | 上游包未发布/发布不全（已核实：`@deepseek-ai/dsh-sdk-server` 404） | 引擎装不上 | `install-engine.ts` 先查 registry，缺失包从锁定 commit 构建 + `npm pack` 兜底（§3.3）；发布集以脚本实时查询为准 |
 | 上游 API/机制演进（reconcile、HMR、启动输出格式） | 壳解析逻辑失效 | 壳只依赖三个稳定触点：`dsh plugin` 命令、stdout URL 行、profile manifest；解析失败降级为「透传原始输出 + 日志」 |
 | Electron 内嵌 Node 与官方 Node ABI 差异 | 原生模块（landlock、`node-addon-require-builtin`）加载失败 | Phase 1 ABI 验证门；受影响包用 `@electron/rebuild` 重编；不可行则切回内置官方 Node 兜底（§3.4） |
+| loader 原生 internals 钩子在 Electron 内嵌 Node 下失效 | 裸插件包名解析失败、引擎无法 boot | `--expose-internals` 前置启动（已实测修复，2026-08-14）；未来若仍失效则评估内置官方 Node 兜底 |
 | Electron 升级导致内嵌 Node major 变化（39 = Node 22，40 起 = Node 24） | 引擎 engines（`^22.19 \|\| >=24`）不满足 | 锁定 Electron ≥ 40；升级前核对 `process.versions.node`，不满足则挡在升级前（§3.4） |
 | 随机端口竞态/健康检查误判 | 白屏或连错服务 | 解析 stdout URL 行为准 + 页面 `__DSH_BOOT__` 断言；启动后定期重检 |
 | pnpm 缺失 | 插件安装不可用 | 壳自带 pnpm（AD-8） |
