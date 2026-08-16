@@ -23,15 +23,22 @@ extraResources:
 npmRebuild: false
 mac:
   category: public.app-category.developer-tools
+  icon: build/icon.icns
   target:
     # zip is required by electron-updater for macOS auto-updates; dmg alone
     # cannot serve delta updates.
     - dmg
     - zip
+dmg:
+  # DMG volume icon; defaults to the app icon otherwise.
+  icon: build/icon.icns
 win:
+  # png is auto-converted to .ico by electron-builder.
+  icon: build/icon.png
   target:
     - nsis
 linux:
+  icon: build/icon.png
   target:
     - AppImage
   category: Development
