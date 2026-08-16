@@ -24,7 +24,10 @@ npmRebuild: false
 mac:
   category: public.app-category.developer-tools
   target:
+    # zip is required by electron-updater for macOS auto-updates; dmg alone
+    # cannot serve delta updates.
     - dmg
+    - zip
 win:
   target:
     - nsis

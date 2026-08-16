@@ -170,7 +170,7 @@ resources/
   - **原子换装（2026-08-16 实现）**：已有引擎时安装进 `resources/engine.new`，验证通过后 swap 换入（失败/中断不动旧引擎）——满足「模拟升级失败不破坏旧引擎」验收。
   - **包管理器兜底（2026-08-16 实现）**：`install-engine.mjs` 优先 npm，无 npm 时用 PATH 上的 pnpm（打包态由 `cliCommandEnv` 的 shim 提供），§10 遗留项关闭。
 - **运行时版本联动**：Electron 升级会同时更换内嵌 Node major（39 = Node 22，40 起 = Node 24）；升级前核对引擎 engines（`^22.19 || >=24`），不满足则禁止升级（§3.4）。
-- **应用更新**：electron-updater 走 GitHub Releases（壳自身）。
+- **应用更新**：electron-updater 走 GitHub Releases（壳自身）。mac 自动更新依赖 zip target（已配 `dmg + zip`，2026-08-16；dmg 不能用于增量更新）。
 - **开发模式**：指向 checkout，`git pull` 即可，壳无感。
 
 ## 6. 仓库结构
@@ -216,7 +216,7 @@ dsh-desktop/
 | Phase | 状态 | 说明 |
 |---|---|---|
 | 0–1 | ✅ | 可运行壳；引擎托管闭环验收项全部实测通过（含 `--expose-internals` 修复） |
-| 2 | ⚠️ | mac 本机全链路通过（install-engine 588 包 / rebuild-engine / smoke PASS / 零环境变量出 UI，含原子换装 + 跨平台 prebuilds 剪枝省 58MB）；win/linux 平台产物待 CI 构建验证 |
+| 2 | ⚠️ | mac 本机全链路通过（install-engine 588 包 / rebuild-engine / smoke PASS / 零环境变量出 UI，含原子换装 + prebuilds 剪枝 352M→294M）；产物 dmg 177M + mac zip 195M（auto-update），打包产物 .app 实机 boot 验证通过；win/linux 平台产物待 CI 构建验证 |
 | 3 | ✅ | `plugins.ts` + 管理窗口；fixture `dsh-hello-bundle` 装 → reconcile → 挂载 → 卸 全流程实测通过 |
 | 4 | ✅ | `tools.ts`：dump-config（15KB 组合树）、LCS diff、patch 校验（容忍 `!!js`）；实时日志面板（环形缓冲回放 + 导出）；启动失败诊断（`diagnoseStartupFailure`） |
 | 5 | ✅ | 版本检查 / `$DSH_HOME` 备份 / 引擎重装已实现并实测；原子换装 + npm→pnpm 兜底（2026-08-16）；electron-updater 已接线（发布版启用） |
