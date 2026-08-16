@@ -25,14 +25,18 @@ pnpm dev
 ### 插件管理
 
 - 已安装列表：模板 bundle（dsh-base、dsh-web-app）、用户 bundle、普通依赖；
+- **新建插件**：输入名字 → 生成模板到 `$DSH_HOME/plugins-local/<name>/`（`dsh.bundle` 声明 + 函数插件入口 + patch 层）并自动安装；
 - 安装：npm 包 / 本地目录（绝对路径，`file:` 链接）/ git 仓库；底层是上游 `dsh plugin --profile web add`（pnpm 安装 + bundles 自动 reconcile），装完自动重启引擎；
 - 卸载 / 更新同理；git 依赖若被 pnpm 拦截 prepare 脚本，按提示在 profile 的 `pnpm-workspace.yaml` 配 `allowBuilds`。
 
 ### 调试工具
 
-- 引擎日志实时流（含 stderr）；
+- 引擎日志实时流（含 stderr；环形缓冲回放最近 500 行，可清空/导出）；
 - 配置树（`--dump-config`）与「与上次对比」diff，定位插件分层位置；
+- 启动失败自动诊断：解析引擎 stderr，给出「插件 X 加载失败 / 缺包 / pnpm 失败 / 网络错误」等友好提示；
 - 补丁编辑器：profile 级 / home 级 `cordis.patch.yml`，保存前 YAML 校验（容忍 `!!js` 表达式）；配置改动 HMR 热生效，结构性改动（增删行）提示重启引擎。
+
+引擎崩溃时窗口会自动回到状态壳显示错误与日志（不会自动重启，防死循环）。
 
 ### 设置与更新
 

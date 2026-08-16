@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
   <title>dsh-desktop 管理</title>
   <style>
     :root { color-scheme: dark; }
@@ -58,6 +58,10 @@
       <button id="refresh-btn">刷新</button>
       <button id="open-profile-btn">打开 profile 目录</button>
     </div>
+    <div class="row">
+      <input type="text" id="scaffold-name" placeholder="新插件名（小写字母/数字/连字符）" />
+      <button id="scaffold-btn">新建插件（生成到 plugins-local 并安装）</button>
+    </div>
     <p class="muted">安装/卸载/更新后会自动重启引擎。本地目录请填绝对路径（file: 链接）；git 依赖若被 pnpm 拦截 prepare 脚本，需在 profile 的 pnpm-workspace.yaml 配置 allowBuilds。</p>
     <div id="action-log"></div>
   </section>
@@ -67,6 +71,8 @@
     <pre id="log-view">— 引擎日志 —</pre>
     <div class="row">
       <button id="reload-engine-btn">重新加载引擎</button>
+      <button id="log-clear-btn">清空日志</button>
+      <button id="log-export-btn">导出日志</button>
     </div>
     <h2>配置树（--dump-config）</h2>
     <div class="row">

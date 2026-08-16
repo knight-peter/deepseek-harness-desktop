@@ -1,12 +1,15 @@
 # dsh-desktop packaging: three-platform targets; the engine and (fallback)
 # bundled Node live under resources/ and must stay unpacked for real file
-# paths (require.resolve + native addons).
+# paths (require.resolve + native addons). scripts/ ships with the app so
+# the in-app engine update (`updater:apply`) can run install-engine.mjs from
+# the asar.
 appId: ai.deepseek.dshdesktop
 productName: dsh-desktop
 directories:
   output: release
 files:
   - dist/**/*
+  - scripts/**/*.mjs
   - package.json
 asarUnpack:
   - resources/engine/**

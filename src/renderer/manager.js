@@ -55,13 +55,27 @@ pluginBody.addEventListener('click', (event) => {
 
 document.getElementById('install-btn').addEventListener('click', () => {
   const kind = document.getElementById('install-kind').value
-  const spec = document.getElementById('install-spec').value.trim()
+  let spec = document.getElementById('install-spec').value.trim()
   if (spec === '') return
-  const full = kind === 'dir' ? `file:${spec}` : spec
-  void api.installPlugin(full).then((result) => {
-    logAction(`安装 ${full}: exit ${String(result.exitCode)}`, result.ok ? 'ok' : 'error')
+  if (kind === 'dir' && !spec.startsWith('file:') && !spec.startsWith('link:')) spec = `file:${spec}`
+  void api.installPlugin(spec).then((result) => {
+    logAction(`安装 ${spec}: exit ${String(result.exitCode)}`, result.ok ? 'ok' : 'error')
     if (!result.ok) logAction(result.output.slice(-800), 'error')
     document.getElementById('install-spec').value = ''
+    return refreshPlugins()
+  })
+})
+document.getElementById('scaffold-btn').addEventListener('click', () => {
+  const name = document.getElementById('scaffold-name').value.trim()
+  if (name === '') return
+  void api.scaffoldPlugin(name).then((result) => {
+    if (!result.ok) {
+      logAction(`新建插件失败：${result.error ?? ''}`, 'error')
+      return
+    }
+    logAction(`已生成并安装 ${result.dir}（exit ${String(result.install.exitCode)}）`, result.install.ok ? 'ok' : 'error')
+    if (!result.install.ok) logAction(result.install.output.slice(-800), 'error')
+    document.getElementById('scaffold-name').value = ''
     return refreshPlugins()
   })
 })
@@ -71,15 +85,32 @@ void refreshPlugins()
 
 // ── debug tab ───────────────────────────────────────────────────────────────
 const logView = document.getElementById('log-view')
-api.onLog((entry) => {
+
+function appendLogEntry(entry) {
   const line = document.createElement('div')
   if (entry.stream === 'stderr') line.className = 'log-stderr'
   line.textContent = entry.line
   logView.appendChild(line)
   logView.scrollTop = logView.scrollHeight
+}
+
+api.onLog(appendLogEntry)
+void api.getRecentLogs().then((lines) => {
+  for (const line of lines) appendLogEntry({ line, stream: 'stdout' })
 })
 
 document.getElementById('reload-engine-btn').addEventListener('click', () => api.restart())
+document.getElementById('log-clear-btn').addEventListener('click', () => { logView.replaceChildren() })
+document.getElementById('log-export-btn').addEventListener('click', async () => {
+  const lines = await api.getRecentLogs()
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `dsh-engine-${new Date().toISOString().replace(/[:.]/g, '-')}.log`
+  anchor.click()
+  URL.revokeObjectURL(url)
+})
 
 const dumpView = document.getElementById('dump-view')
 document.getElementById('dump-btn').addEventListener('click', async () => {

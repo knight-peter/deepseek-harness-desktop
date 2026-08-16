@@ -113,6 +113,34 @@ export class Tools {
   }
 }
 
+/**
+ * Turn engine boot stderr into a friendly one-line diagnosis. Returns ''
+ * when no known pattern matches; the caller falls back to the raw message.
+ * @param logs - the recent engine log lines.
+ */
+export function diagnoseStartupFailure(logs: string[]): string {
+  const text = logs.join('\n')
+  const loader = /failed to import loader entry ([^\s:]+)|unresolved plugin[^\n]*/.exec(text)
+  if (loader !== null) {
+    return `插件加载失败：${loader[1] ?? '存在解析不到的插件'}。可能未安装、包名错误或版本不兼容；详见日志。`
+  }
+  const missing = /Cannot find package '([^']+)'/.exec(text)
+  if (missing !== null) {
+    return `依赖解析失败：找不到包 ${missing[1]}。`
+  }
+  const pnpm = /pnpm (?:failed|error)[^\n]*/.exec(text)
+  if (pnpm !== null) {
+    return `插件安装失败（pnpm）：${pnpm[0]}`
+  }
+  if (/ECONNREFUSED|ENOTFOUND|fetch failed|ETIMEDOUT/.test(text)) {
+    return '网络错误：无法访问所需服务或 npm registry。'
+  }
+  if (/plugin tree failed to load/.test(text)) {
+    return '插件树加载失败（组合或依赖问题）；详见日志。'
+  }
+  return ''
+}
+
 /** Entry ids a patch composes: targeted rows (`id`) and inserted rows (`insert[].id`). */
 function idsOf(text: string): Set<string> {
   const ids = new Set<string>()

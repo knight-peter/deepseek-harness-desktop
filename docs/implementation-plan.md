@@ -2,7 +2,7 @@
 
 DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口、管理插件与更新；业务功能 100% 复用上游 `dsh web` 原版，上游仓库的持续更新不影响壳。
 
-- 状态：Phase 0–6 已实施并验证，Phase 7 部分完成（CI + 文档；签名/发布通道待定）（2026-08-16）
+- 状态：Phase 0–6 已实施并验证，Phase 7 部分完成（CI + 文档；签名/发布通道待定）（2026-08-16；2026-08-16 代码审查修复：诊断/脚手架/原子升级/日志缓冲/CSP）
 - 上游：https://github.com/deepseek-ai/deepseek-harness（下文简称「上游」）
 - 上游版本基线：checkout `0.1.0-rc.5`；npm `latest` 已到 `0.1.0-rc.6`（2026-08-14 核实）
 - 相关讨论：见本仓库 `docs/` 后续补充的设计笔记
@@ -85,7 +85,7 @@ DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口�
 2. **启动**：以 `ELECTRON_RUN_AS_NODE=1` 用 `process.execPath` 派生 `<node>`，**前置 `--expose-internals`**（原因见 §3.4 实测发现），执行 `<resources>/engine/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --port 0`（随机端口），监听 stdout，匹配 `dsh web: http://127.0.0.1:<port>` 行（上游启动时打印 URL）拿到真实端口；就绪后 BrowserWindow 加载。
 3. **健康检查**：端口可连 + `GET /` 返回 200 且页面包含 `__DSH_BOOT__` 注入脚本（生产模式禁止加载裸 Vite/静态页）。
 4. **优雅停机**：关窗 → 向引擎发 SIGTERM → 等待退出（上限 N 秒）→ 超时强杀；退出码 0 视为正常关闭静默处理，非 0 弹错误诊断（AD-10）。
-5. **启动失败诊断**：上游 `assertEntriesLoaded/Activated` 会把解析不到的插件变成启动失败并指名插件名，`installFailLoud` 输出一行带标签的 stderr 后 `exit(1)`；壳解析 stderr → 渲染友好错误卡片（「插件 X 未找到」等），附完整日志。
+5. **启动失败诊断**：上游 `assertEntriesLoaded/Activated` 会把解析不到的插件变成启动失败并指名插件名，`installFailLoud` 输出一行带标签的 stderr 后 `exit(1)`；壳解析 stderr → 渲染友好错误卡片（「插件 X 未找到」等），附完整日志。**已实现（2026-08-16）**：`tools.ts` 的 `diagnoseStartupFailure` 模式匹配（loader 条目/缺包/pnpm/网络）生成友好提示，harness 日志环形缓冲（500 行）供诊断与晚开窗口回放。
 
 ### 3.3 资源布局（发布版）
 
@@ -146,8 +146,8 @@ resources/
 
 ### 4.3 调试
 
-- **日志面板**：捕获引擎 stdout/stderr，tail / 过滤 / 导出。启动失败行、pnpm 输出都在里面。
-- **启动失败诊断**：解析 stderr → 友好错误卡片（unresolved plugin 指名、pnpm 失败原因）；不自动重启（AD-10）。
+- **日志面板**：捕获引擎 stdout/stderr，tail / 清空 / 导出；harness 环形缓冲（500 行）保证晚开的管理窗口可回放。启动失败行、pnpm 输出都在里面。
+- **启动失败诊断**：`diagnoseStartupFailure` 解析 stderr → 友好错误卡片（loader 条目指名、缺包、pnpm 失败、网络错误）；不自动重启（AD-10）。
 - **配置树视图**：面板内只读展示 `dsh --profile web --dump-config` 结果，支持「装插件前/后 diff」，定位「为什么没生效」。
 - **宿主插件迭代**：改代码 → 面板「重新加载引擎」→ 看日志。
 - **断点调试（高级）**：以 `NODE_OPTIONS=--inspect=9229` 启动引擎，Chrome DevTools attach；壳只透传 env，零侵入。
@@ -157,7 +157,7 @@ resources/
 
 ### 4.4 插件作者工作流（端到端）
 
-1. 脚手架：面板「新建插件」→ 生成模板（`package.json` 声明 `dsh.bundle`/`dsh.client` + `cordis.patch.yml` + 入口）。
+1. 脚手架：面板「新建插件」→ 生成模板到 `$DSH_HOME/plugins-local/<name>/`（`package.json` 声明 `dsh.bundle` + 函数插件入口 + `cordis.patch.yml`）并自动 `file:` 安装（已实现，2026-08-16）。
 2. 挂载：模板放 `$DSH_HOME/plugins-local/` → 面板一键安装（file: 链接）→ 自动重启。
 3. 迭代：宿主插件改代码 → 重启引擎 → 看日志；前端插件开发模式 HMR；配置走 patch 热更。
 4. 验证：设置页插件清单（行已挂载）+ 日志无报错 + `--dump-config` 树确认分层位置。
@@ -167,7 +167,8 @@ resources/
 
 - **数据安全**：升级只换引擎，`$DSH_HOME` 原样保留（上游设计保证）。
 - **引擎更新**：面板/自动检查 npm registry 最新版（对比锁定版本）→ 后台安装进 `resources/engine/` → 重启引擎。**升级前自动备份 `$DSH_HOME` 一次**（预发布期 `SESSION_FORMAT_VERSION=0` 不承诺兼容）。
-  - **已知限制**：`updater:apply` 复用 `scripts/install-engine.mjs`，其 npm install 依赖机器上的 npm；打包态无 npm 的机器需改用内置 pnpm（遗留项，见 §10）。
+  - **原子换装（2026-08-16 实现）**：已有引擎时安装进 `resources/engine.new`，验证通过后 swap 换入（失败/中断不动旧引擎）——满足「模拟升级失败不破坏旧引擎」验收。
+  - **包管理器兜底（2026-08-16 实现）**：`install-engine.mjs` 优先 npm，无 npm 时用 PATH 上的 pnpm（打包态由 `cliCommandEnv` 的 shim 提供），§10 遗留项关闭。
 - **运行时版本联动**：Electron 升级会同时更换内嵌 Node major（39 = Node 22，40 起 = Node 24）；升级前核对引擎 engines（`^22.19 || >=24`），不满足则禁止升级（§3.4）。
 - **应用更新**：electron-updater 走 GitHub Releases（壳自身）。
 - **开发模式**：指向 checkout，`git pull` 即可，壳无感。
@@ -215,11 +216,11 @@ dsh-desktop/
 | Phase | 状态 | 说明 |
 |---|---|---|
 | 0–1 | ✅ | 可运行壳；引擎托管闭环验收项全部实测通过（含 `--expose-internals` 修复） |
-| 2 | ✅ | `install-engine.mjs`（registry 主路径 + DSH_CHECKOUT 构建兜底）安装 588 包；`rebuild-engine.mjs` 已将引擎树 node-pty 按 Electron ABI 重编；`smoke.mjs` PASS；`pnpm dev` 零环境变量从 `resources/engine` 出 web UI |
+| 2 | ⚠️ | mac 本机全链路通过（install-engine 588 包 / rebuild-engine / smoke PASS / 零环境变量出 UI，含原子换装）；win/linux 平台产物待 CI 构建验证 |
 | 3 | ✅ | `plugins.ts` + 管理窗口；fixture `dsh-hello-bundle` 装 → reconcile → 挂载 → 卸 全流程实测通过 |
-| 4 | ✅ | `tools.ts`：dump-config（15KB 组合树）、LCS diff、patch 校验（容忍 `!!js`）；实时日志面板 |
-| 5 | ⚠️ | 版本检查 / `$DSH_HOME` 备份 / 引擎重装已实现并实测；打包态重装依赖机器 npm（遗留项见 §10）；electron-updater 已接线（发布版启用） |
-| 6 | ✅ | `config.ts`（settings.json）：checkoutPath / inspectPort / autoCheckUpdates；成为引擎来源第 4 优先级 |
+| 4 | ✅ | `tools.ts`：dump-config（15KB 组合树）、LCS diff、patch 校验（容忍 `!!js`）；实时日志面板（环形缓冲回放 + 导出）；启动失败诊断（`diagnoseStartupFailure`） |
+| 5 | ✅ | 版本检查 / `$DSH_HOME` 备份 / 引擎重装已实现并实测；原子换装 + npm→pnpm 兜底（2026-08-16）；electron-updater 已接线（发布版启用） |
+| 6 | ⚠️ | `config.ts`（settings.json）：checkoutPath / inspectPort / autoCheckUpdates；成为引擎来源第 4 优先级；「dev:web 客户端插件热重载」未实测（需上游 checkout + 客户端插件 fixture） |
 | 7 | ⚠️ | CI workflow + 用户指南 + 插件作者指南已交付；签名证书与 GitHub Releases 发布通道待定 |
 
 ### Phase 0 — 仓库脚手架
@@ -320,6 +321,6 @@ dsh-desktop/
 - [x] 插件面板形态：壳内嵌页 + preload API（渲染层极薄、不引框架；2026-08-14 定）。
 - [x] 自动检查更新：默认关，手动检查（2026-08-14 定）。
 - [ ] 首个 release 的签名证书与发布通道（GitHub Releases）（Phase 7 前再定，不阻塞）。
-- [ ] 打包态引擎升级的 npm 依赖：`updater:apply` 目前需要机器上有 npm；发布版应改用内置 pnpm（`cliCommandEnv` 的 shim 已就位）。
+- [x] 打包态引擎升级的包管理器：`install-engine.mjs` 已支持 npm→pnpm 兜底（`cliCommandEnv` shim 提供 PATH 上的 pnpm/node）（2026-08-16 关闭）。
 - [x] 开发模式「使用源码目录」：由设置项落地（§6）；源码 launch（tsx）未做——当前用 checkout 已构建 CLI，行为等价（2026-08-16 定）。
 - [x] Electron 版本：锁定 43.x（Node 24；2026-08-14 当前 stable 43.4.0，见 §3.4）。

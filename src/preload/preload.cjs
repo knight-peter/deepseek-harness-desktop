@@ -14,6 +14,7 @@ function on(channel, callback) {
 contextBridge.exposeInMainWorld('dshDesktop', {
   // harness
   getState: () => ipcRenderer.invoke('harness:get-state'),
+  getRecentLogs: () => ipcRenderer.invoke('harness:get-logs'),
   onStateChange: (callback) => on('harness:state', callback),
   onLog: (callback) => on('harness:log', callback),
   onErrorDetail: (callback) => on('harness:error-detail', callback),
@@ -23,6 +24,7 @@ contextBridge.exposeInMainWorld('dshDesktop', {
 
   // plugins (Phase 3)
   listPlugins: () => ipcRenderer.invoke('plugins:list'),
+  scaffoldPlugin: (name) => ipcRenderer.invoke('plugins:scaffold', name),
   installPlugin: (spec) => ipcRenderer.invoke('plugins:install', spec),
   uninstallPlugin: (name) => ipcRenderer.invoke('plugins:uninstall', name),
   updatePlugin: (name) => ipcRenderer.invoke('plugins:update', name),

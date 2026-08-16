@@ -15,7 +15,7 @@ import { Harness, nodeSatisfiesEngine } from './harness.js'
 import type { Settings } from './config.js'
 import { SettingsStore } from './config.js'
 import { PluginManager } from './plugins.js'
-import { Tools } from './tools.js'
+import { diagnoseStartupFailure, Tools } from './tools.js'
 import { backupDshHome, installedEngineVersion, latestEngineVersion } from './updater.js'
 
 // electron-updater is CommonJS; named ESM imports fail at load time.
@@ -26,6 +26,7 @@ let mainWindow: BrowserWindow | null = null
 let managerWindow: BrowserWindow | null = null
 let engineUiLoaded = false
 let lastDump = ''
+let quitting = false
 
 const settings = new SettingsStore(app.getPath('userData'))
 
@@ -86,6 +87,7 @@ function broadcast(channel: string, payload: unknown): void {
 
 const harness = new Harness({
   onStateChange: (state) => {
+    if (quitting) return
     console.log('[harness] state:', JSON.stringify(state))
     broadcast('harness:state', state)
     if (state.kind === 'starting') engineUiLoaded = false
@@ -95,6 +97,13 @@ const harness = new Harness({
       engineUiLoaded = true
       console.log('[shell] loading engine UI:', state.url)
       void mainWindow.loadURL(state.url)
+    }
+    // An engine failure while the window shows the engine UI must bring the
+    // status shell back, or the error would be invisible behind a dead page.
+    if ((state.kind === 'error' || state.kind === 'stopped') && engineUiLoaded && mainWindow !== null && !mainWindow.isDestroyed()) {
+      engineUiLoaded = false
+      console.log('[shell] engine down — returning to the status shell')
+      void mainWindow.loadFile(join(import.meta.dirname, 'renderer/index.html'))
     }
   },
   onLog: (line, stream) => {
@@ -113,8 +122,11 @@ async function startEngine(): Promise<void> {
   try {
     await harness.start({ dshBin, env: engineNodeEnv() })
   } catch (error) {
-    // The harness already pushed an error state; surface the reason on the UI.
-    broadcast('harness:error-detail', String(error))
+    // The harness already pushed an error state; add a friendly diagnosis
+    // parsed from the engine's recent stderr.
+    const hint = diagnoseStartupFailure(harness.recentLogs)
+    const detail = hint === '' ? String(error) : `${hint}\n${String(error)}`
+    broadcast('harness:error-detail', detail)
   }
 }
 
@@ -205,6 +217,7 @@ function pluginManager(): PluginManager {
     dshBin: resolveDshBin(),
     nodeCommand: process.execPath,
     env: cliCommandEnv(),
+    pluginsLocalDir: join(dshHome(), 'plugins-local'),
   })
 }
 
@@ -264,7 +277,6 @@ async function boot(): Promise<void> {
   }
 }
 
-let quitting = false
 app.on('before-quit', (event) => {
   if (quitting) return
   event.preventDefault()
@@ -277,11 +289,20 @@ process.on('SIGTERM', () => app.quit())
 // ── IPC ────────────────────────────────────────────────────────────────────
 
 ipcMain.handle('harness:get-state', () => harness.currentState)
+ipcMain.handle('harness:get-logs', () => harness.recentLogs)
 ipcMain.handle('harness:restart', () => restartEngine())
 ipcMain.handle('app:quit', () => app.quit())
 ipcMain.handle('app:open-manager', () => createManagerWindow())
 
 ipcMain.handle('plugins:list', () => pluginManager().list())
+ipcMain.handle('plugins:scaffold', async (_event, name: string) => {
+  const scaffold = pluginManager().scaffold(name)
+  if (!scaffold.ok || scaffold.dir === undefined) return scaffold
+  // Mount immediately: file: link + reconcile + engine restart.
+  const result = pluginManager().install(`file:${scaffold.dir}`)
+  if (result.ok) await restartEngine()
+  return { ...scaffold, install: result }
+})
 ipcMain.handle('plugins:install', async (_event, spec: string) => {
   const result = pluginManager().install(spec)
   if (result.ok) await restartEngine()

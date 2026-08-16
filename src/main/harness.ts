@@ -60,11 +60,27 @@ export class Harness {
   private state: HarnessState = { kind: 'idle' }
   private url: string | null = null
   private stopping = false
+  private readonly recent: string[] = []
+  private readonly pending: Record<'stdout' | 'stderr', string> = { stdout: '', stderr: '' }
+  private static readonly MAX_RECENT = 500
 
   constructor(private readonly events: HarnessEvents) {}
 
   get currentState(): HarnessState {
     return this.state
+  }
+
+  /** The most recent engine log lines (both streams, by arrival order). */
+  get recentLogs(): string[] {
+    return [...this.recent]
+  }
+
+  private recordLog(line: string, stream: 'stdout' | 'stderr'): void {
+    this.recent.push(line)
+    if (this.recent.length > Harness.MAX_RECENT) {
+      this.recent.splice(0, this.recent.length - Harness.MAX_RECENT)
+    }
+    this.events.onLog(line, stream)
   }
 
   private setState(next: HarnessState): void {
@@ -101,12 +117,21 @@ export class Harness {
     child.stderr.on('data', (chunk: string) => this.onOutput(chunk, 'stderr'))
     child.on('exit', (code, signal) => this.onExit(code, signal))
     child.on('error', (error) => {
-      this.events.onLog(`harness: spawn failed: ${String(error)}`, 'stderr')
+      this.recordLog(`harness: spawn failed: ${String(error)}`, 'stderr')
       this.setState({ kind: 'error', message: '引擎进程启动失败', detail: String(error) })
     })
 
-    const url = await this.waitForUrl(options.urlTimeoutMs ?? 30_000)
-    await this.waitHealthy(url, options.healthTimeoutMs ?? 30_000)
+    let url: string
+    try {
+      url = await this.waitForUrl(options.urlTimeoutMs ?? 30_000)
+      await this.waitHealthy(url, options.healthTimeoutMs ?? 30_000)
+    } catch (error) {
+      // A failed start must not leave the UI stuck on "starting".
+      const detail = error instanceof Error ? error.message : String(error)
+      this.recordLog(`harness: start failed — ${detail}`, 'stderr')
+      this.setState({ kind: 'error', message: '引擎启动失败', detail })
+      throw error
+    }
     this.setState({ kind: 'running', url })
     return url
   }
@@ -174,8 +199,13 @@ export class Harness {
   private onOutput(chunk: string, stream: 'stdout' | 'stderr'): void {
     const match = URL_LINE.exec(chunk)
     if (match !== null) this.url = match[1]
-    for (const line of chunk.split(/\r?\n/)) {
-      if (line.length > 0) this.events.onLog(line, stream)
+    // Complete lines are logged as they arrive; a trailing partial line
+    // stays buffered until the next chunk (or is dropped at teardown).
+    const combined = this.pending[stream] + chunk
+    const lines = combined.split(/\r?\n/)
+    this.pending[stream] = lines.pop() ?? ''
+    for (const line of lines) {
+      if (line.length > 0) this.recordLog(line, stream)
     }
   }
 
@@ -186,7 +216,7 @@ export class Harness {
       return
     }
     const detail = `exit code=${String(code)} signal=${String(signal ?? 'none')}`
-    this.events.onLog(`harness: engine exited unexpectedly — ${detail}`, 'stderr')
+    this.recordLog(`harness: engine exited unexpectedly — ${detail}`, 'stderr')
     this.setState({ kind: 'error', message: '引擎异常退出（未自动重启，AD-10）', detail })
   }
 }

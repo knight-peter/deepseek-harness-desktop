@@ -8,7 +8,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /** The shipped web-profile bundle tuple; never user-managed. */
@@ -32,6 +32,8 @@ export interface PluginManagerOptions {
   nodeCommand: string
   /** Extra environment, e.g. PATH with pnpm; `ELECTRON_RUN_AS_NODE` included by caller. */
   env: Record<string, string>
+  /** `$DSH_HOME/plugins-local`: local plugin sources (`scaffold` writes here). */
+  pluginsLocalDir: string
 }
 
 export interface CommandResult {
@@ -53,13 +55,56 @@ export class PluginManager {
 
   /** `dsh plugin --profile web <args...>` via the injected node + env. */
   runPluginCommand(args: string[]): CommandResult {
+    if (this.options.dshBin === '') {
+      return { ok: false, exitCode: null, output: '未找到 dsh 引擎：无法执行插件管理命令（请先配置引擎来源）' }
+    }
     const result = spawnSync(this.options.nodeCommand, ['--expose-internals', this.options.dshBin, 'plugin', '--profile', 'web', ...args], {
       env: this.options.env,
       encoding: 'utf8',
-      timeout: 120_000,
+      timeout: 300_000,
     })
     const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
     return { ok: result.status === 0, exitCode: result.status, output }
+  }
+
+  /**
+   * Scaffold a new local bundle plugin under `$DSH_HOME/plugins-local/<name>`
+   * (package.json with `dsh.bundle`, a function-plugin entry, and its patch
+   * layer). The caller then installs it via `file:<dir>`.
+   * @param name - lowercase npm-style plugin name.
+   */
+  scaffold(name: string): { ok: boolean; dir?: string; error?: string } {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) {
+      return { ok: false, error: '插件名只能由小写字母、数字、连字符组成' }
+    }
+    const dir = join(this.options.pluginsLocalDir, name)
+    if (existsSync(dir)) return { ok: false, error: `目录已存在：${dir}` }
+    mkdirSync(join(dir, 'lib'), { recursive: true })
+    writeFileSync(join(dir, 'package.json'), `${JSON.stringify({
+      name,
+      version: '0.0.1',
+      description: `Local bundle plugin scaffolded by dsh-desktop`,
+      private: true,
+      type: 'module',
+      exports: { './entry': './lib/index.js' },
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+    }, null, 2)}\n`)
+    writeFileSync(join(dir, 'lib', 'index.js'), `// ${name}: a host-side function plugin mounted by the patch layer below.
+export const name = '${name}'
+
+export const inject = []
+
+export function apply(ctx) {
+  console.log('[${name}] mounted')
+  ctx.provide('${name}Greeting', 'hello from ${name}')
+}
+`)
+    writeFileSync(join(dir, 'cordis.patch.yml'), `# ${name} patch layer: mounts the entry as one web-profile row.
+- insert:
+    - id: ${name}
+      name: ${name}/entry
+`)
+    return { ok: true, dir }
   }
 
   /** Installed plugins from the profile manifest (dependencies + bundle layers). */
