@@ -183,8 +183,8 @@ dsh-desktop/
 ├─ .gitignore
 ├─ docs/
 │  ├─ implementation-plan.md      # 本文档
-│  ├─ development-summary.md      # 开发总结（含插件开发/测试调试）
-│  └─ usage-summary.md            # 使用总结（安装/插件/更新）
+│  ├─ 开发总结.md                 # 开发总结（含插件开发/测试调试）
+│  └─ 使用总结.md                 # 使用总结（安装/插件/更新）
 ├─ src/
 │  ├─ main/
 │  │  ├─ index.ts           # 生命周期、单实例锁、菜单、窗口、IPC、更新接线

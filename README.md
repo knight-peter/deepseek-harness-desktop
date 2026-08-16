@@ -25,7 +25,7 @@ pnpm dev
 - **调试工具**：引擎日志实时流、配置树（`--dump-config`）与 diff、`cordis.patch.yml` 补丁编辑器（YAML 校验，配置改动 HMR 热生效）；
 - **设置与更新**：开发模式 checkout 路径、引擎调试端口（`--inspect`）、引擎版本检查 / `$DSH_HOME` 备份 / 引擎重装。
 
-详见 `docs/usage-summary.md`。
+详见 `docs/使用总结.md`。
 
 ## 命令
 
@@ -43,5 +43,5 @@ pnpm pack             # 构建 + electron-builder 三平台打包
 ## 文档
 
 - `docs/implementation-plan.md` — 实施计划与架构决策（AD-1 ~ AD-10，含 Phase 进度）
-- `docs/development-summary.md` — 开发总结：仓库结构、核心机制、插件开发与测试调试
-- `docs/usage-summary.md` — 使用总结：安装、插件、更新、故障排查
+- `docs/开发总结.md` — 开发总结：仓库结构、核心机制、插件开发与测试调试
+- `docs/使用总结.md` — 使用总结：安装、插件、更新、故障排查
