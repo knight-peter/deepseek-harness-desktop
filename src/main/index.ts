@@ -35,8 +35,10 @@ const harness = new Harness({
 
 /**
  * Resolve the dsh CLI entry, in priority order: explicit `DSH_ENGINE_BIN`
- * override, the packaged engine under `resources/engine`, then a
- * `DSH_CHECKOUT` dev checkout's built CLI. Returns '' when nothing resolves.
+ * override, the packaged engine under `resources/engine`, a `DSH_CHECKOUT`
+ * dev checkout's built CLI, then — dev mode only — a sibling
+ * `deepseek-harness` checkout next to this repository. Returns '' when
+ * nothing resolves.
  */
 function resolveDshBin(): string {
   const override = process.env.DSH_ENGINE_BIN
@@ -49,13 +51,17 @@ function resolveDshBin(): string {
     const dev = join(checkout, 'apps', 'cli', 'lib', 'bin.js')
     if (existsSync(dev)) return dev
   }
+  if (!app.isPackaged) {
+    const sibling = join(app.getAppPath(), '..', 'deepseek-harness', 'apps', 'cli', 'lib', 'bin.js')
+    if (existsSync(sibling)) return sibling
+  }
   return ''
 }
 
 async function startEngine(): Promise<void> {
   const dshBin = resolveDshBin()
   if (dshBin === '') {
-    const detail = '设置 DSH_ENGINE_BIN 或 DSH_CHECKOUT，或先运行 scripts/install-engine.ts（Phase 2）'
+    const detail = '设置 DSH_ENGINE_BIN 或 DSH_CHECKOUT（或将本仓库放在 deepseek-harness 兄弟目录后重试），或先运行 scripts/install-engine.ts（Phase 2）'
     dialog.showErrorBox('dsh-desktop', `未找到 dsh 引擎。${detail}`)
     return
   }
