@@ -182,9 +182,9 @@ dsh-desktop/
 ├─ .github/workflows/build.yml  # CI：lint/typecheck/install-engine/rebuild/smoke/pack
 ├─ .gitignore
 ├─ docs/
-│  ├─ implementation-plan.md   # 本文档
-│  ├─ user-guide.md            # 用户指南
-│  └─ plugin-authoring.md      # 插件作者指南
+│  ├─ implementation-plan.md      # 本文档
+│  ├─ development-summary.md      # 开发总结（含插件开发/测试调试）
+│  └─ usage-summary.md            # 使用总结（安装/插件/更新）
 ├─ src/
 │  ├─ main/
 │  │  ├─ index.ts           # 生命周期、单实例锁、菜单、窗口、IPC、更新接线
@@ -221,7 +221,7 @@ dsh-desktop/
 | 4 | ✅ | `tools.ts`：dump-config（15KB 组合树）、LCS diff、patch 校验（容忍 `!!js`）；实时日志面板（环形缓冲回放 + 导出）；启动失败诊断（`diagnoseStartupFailure`） |
 | 5 | ✅ | 版本检查 / `$DSH_HOME` 备份 / 引擎重装已实现并实测；原子换装 + npm→pnpm 兜底（2026-08-16）；electron-updater 已接线（发布版启用） |
 | 6 | ⚠️ | `config.ts`（settings.json）：checkoutPath / inspectPort / autoCheckUpdates；成为引擎来源第 4 优先级；「dev:web 客户端插件热重载」未实测（需上游 checkout + 客户端插件 fixture） |
-| 7 | ⚠️ | CI workflow + 用户指南 + 插件作者指南已交付；签名证书与 GitHub Releases 发布通道待定 |
+| 7 | ⚠️ | CI workflow + 开发总结（含插件开发/调试）+ 使用总结文档已交付；签名证书与 GitHub Releases 发布通道待定 |
 
 ### Phase 0 — 仓库脚手架
 

@@ -1,0 +1,220 @@
+# dsh-desktop 开发总结
+
+> 面向后续接手维护的开发者。读完本文你应能回答：这个仓库是怎么运转的、改一处代码要跑什么验证、dsh 插件怎么开发与调试。更完整的决策历史（AD-1 ~ AD-10、实施阶段、风险表）见 `docs/implementation-plan.md`，本文不再重复论证过程，只保留结论与「踩过的坑」。
+
+## 1. 项目定位与架构一句话
+
+dsh-desktop 是 DeepSeek Harness（下文简称「上游」，https://github.com/deepseek-ai/deepseek-harness）的 Electron 桌面壳：
+
+- **业务 100% 复用上游** `dsh web` 界面——壳不 fork、不改上游任何代码；
+- 引擎（Node 宿主进程）由壳作为**子进程**托管，运行在 **Electron 内嵌 Node** 上（`ELECTRON_RUN_AS_NODE=1`），用户机器零依赖（无需安装 Node / pnpm）；
+- 所有用户数据仍在 `$DSH_HOME`（默认 `~/.dsh`），与 `dsh` CLI 完全共享，壳不迁移、不接管（AD-5）；
+- 上游持续更新不影响壳：壳只依赖三个稳定触点（§5.6），引擎以 npm 发布版锁定安装（AD-3）。
+
+一句话：**壳 = 窗口 + 引擎进程管理 + 插件/调试/更新工具集；引擎 = 上游 `dsh web` 原样。**
+
+## 2. 技术栈
+
+| 组件 | 选择 | 说明 |
+|---|---|---|
+| 运行时 | Electron 43.x，**锁定 ≥ 40** | 内嵌 Node 24 满足引擎 engines `^22.19 \|\| >=24`；Electron 39 = Node 22 不满足（升级 Electron 时必须重新核对） |
+| 语言 | TypeScript（NodeNext ESM，strict） | 只编译 main 进程；preload 用 CJS、renderer 用原生 JS，**均不引框架**（渲染层极薄，刻意不用 electron-vite/React） |
+| 打包 | electron-builder 26.x | 三平台：mac dmg+zip / win nsis / linux AppImage |
+| 应用更新 | electron-updater | 壳自身更新走 GitHub Releases；引擎更新走 install-engine 重装（§4.7） |
+| 其他依赖 | js-yaml（patch 校验）、pnpm（内置，供 `dsh plugin` 使用，AD-8） | |
+
+**依赖覆盖（pnpm-workspace.yaml）**：`overrides: { '@electron/get': '5.1.0' }` —— app-builder-lib 26.15.3 引用了只存在于 `@electron/get` ≥ 5 的 `ElectronDownloadCacheMode`，而它声明的 `^3.0.0` 范围会解析到 3.0.0（缺该导出 → 打包时崩溃）。升级 electron-builder 时若上游已修可移除；`allowBuilds: electron-winstaller: false` 同理是规避不需要的构建脚本。
+
+## 3. 目录结构与模块职责
+
+```
+dsh-desktop/
+├─ package.json / pnpm-workspace.yaml / tsconfig.json / eslint.config.mjs
+├─ electron-builder.yml          # 打包配置（§4.6）
+├─ .github/workflows/build.yml   # CI：三平台矩阵（§6.3）
+├─ docs/
+│  ├─ implementation-plan.md     # 实施计划 + 架构决策（改架构前必读）
+│  ├─ development-summary.md     # 本文
+│  └─ usage-summary.md           # 使用总结（终端用户）
+├─ src/
+│  ├─ main/                      # Electron main 进程（TS 编译到 dist/）
+│  │  ├─ index.ts                # 组装层：生命周期/单实例锁/菜单/窗口/IPC；引擎来源解析；打包态 CLI shim
+│  │  ├─ harness.ts              # 引擎子进程管理（§4.1）
+│  │  ├─ plugins.ts              # 插件管理后端：包装 dsh plugin 命令 + 脚手架（§4.5）
+│  │  ├─ tools.ts                # 调试工具：dump-config / diff / patch 校验写入 / 启动失败诊断
+│  │  ├─ config.ts               # settings.json 持久化（原子写）
+│  │  └─ updater.ts              # 引擎版本检查 / $DSH_HOME 备份（electron-free）
+│  ├─ preload/preload.cjs        # contextBridge：dshDesktop.* API（harness/plugins/tools/settings/updater）
+│  └─ renderer/                  # 纯 JS 页面：index.html 状态壳 + manager.html 管理窗口（三页签）
+├─ scripts/
+│  ├─ copy-static.mjs            # tsc 后把 preload/renderer 拷进 dist/
+│  ├─ install-engine.mjs         # 引擎安装/升级（§4.4）——本仓库最关键的脚本
+│  ├─ rebuild-engine.mjs         # @electron/rebuild 重编引擎原生模块（§4.3）
+│  └─ smoke.mjs                  # 引擎冒烟：boot + 健康检查 + 优雅退出（§6.1）
+├─ test/fixtures/hello-bundle/   # 插件全流程测试 fixture（§6.2）
+├─ resources/                    # 运行期资源（gitignore）：engine/ = 引擎安装区
+└─ release/                      # 打包产物（gitignore）：dmg/zip/.app 等
+```
+
+**架构分层约定**：`plugins.ts` / `tools.ts` / `config.ts` / `updater.ts` 都是 **electron-free**——不 import electron，路径和可执行文件由调用方注入（`index.ts` 的 `pluginManager()` / `tools()` 组装）。因此它们可以直接用普通 Node 对 dist/ 做单测。新增业务模块请保持这个约定；只有 `index.ts`（和 preload）接触 Electron API。
+
+## 4. 核心机制
+
+### 4.1 引擎子进程托管（harness.ts）
+
+**启动序列**：
+
+1. `resolveDshBin()`（index.ts）按优先级找引擎入口：`DSH_ENGINE_BIN` 环境变量 → `resources/engine` 打包引擎 → `DSH_CHECKOUT`（上游源码目录，用其已构建的 `apps/cli/lib/bin.js`）→ 设置里保存的 checkout 路径（仅开发模式生效）。找不到 → 弹错误框提示配置其一。
+2. 启动前核对 `process.versions.node` 满足引擎 engines（`nodeSatisfiesEngine`），不满足直接报错退出。
+3. spawn：`process.execPath --expose-internals <bin> --profile web --port 0`，env 带 `ELECTRON_RUN_AS_NODE=1`。
+4. 解析 stdout 中 `dsh web: http://127.0.0.1:<port>` 拿到**随机端口**（`--port 0`，避免与默认 3080 冲突）。
+5. 健康检查：HTTP 200 且页面包含 `__DSH_BOOT__` 注入。**必须断言 `__DSH_BOOT__`**——dsh 的 web UI 不是独立前端（宿主进程向 index.html 注入入口图后客户端才挂载），裸的静态页不代表引擎就绪。
+6. 状态机 `idle → starting → running / error / stopped` 广播给所有窗口；`running` 时主窗口从状态壳 loadURL 到引擎 UI；`error` / `stopped` 时回到状态壳（否则错误会藏在死页面后面看不见）。
+
+**停机**：关窗/退出 → SIGTERM → 等 10s → SIGKILL，无残留进程。**异常退出（非 0）绝不自动重启**（AD-10，防崩溃死循环），状态壳展示错误 + 诊断。
+
+**日志**：stdout/stderr 行缓冲后双写（控制台 `[engine:*]` 前缀 + 广播），同时进 500 行环形缓冲 `recentLogs`——晚开的管理窗口也能回放。
+
+> **为什么有 `--expose-internals`（本仓库最重要的实测发现，2026-08-14）**：Electron 内嵌 Node 下，上游 vendored loader 的原生 internals 钩子（node-addon-require-builtin）会**静默失效**，导致裸插件包名（如 `@deepseek-ai/cordis-plugin-timer`）解析失败、引擎 boot 报 `ERR_MODULE_NOT_FOUND`。加上 `--expose-internals` 后 loader 检测到该 execArg 走纯 `require` 回退路径。**所有跑引擎/CLI 的地方（harness、plugins、tools、smoke）都必须带这个 flag**——漏加的第一个症状就是裸插件名 `ERR_MODULE_NOT_FOUND`。
+
+### 4.2 引擎为什么不在 Electron 进程内嵌入
+
+（决策记录见计划 §3.5）进程内 `boot()` 能拿到 service 级集成，但代价是 Electron 的 Node ABI 与官方 Node 不同（原生模块要重编）、生命周期与进程模型耦合、升级跟着 Electron 重编。子进程方案把引擎与壳彻底隔离，升级只换引擎目录。若未来要托盘/菜单直连 service，评估 `@deepseek-ai/dsh-sdk`（stdio JSON-RPC）作为桥，不要直接嵌入。
+
+### 4.3 原生模块与 ABI（rebuild-engine.mjs）
+
+Electron 内嵌 Node 的 `NODE_MODULE_VERSION` 与官方 Node 不同。`rebuild-engine.mjs` 全树扫描 `.node` 文件：路径含 `prebuilt` 的跳过（N-API prebuilds ABI 稳定，跨 Node/Electron 通用），其余用 `@electron/rebuild` 按当前 Electron 版本重编。**升级 Electron 大版本后必须重跑 install-engine + rebuild-engine + smoke。**
+
+### 4.4 引擎安装与升级（install-engine.mjs）
+
+- **锁定版本**：文件顶部 `LOCKED` 常量（当前 `@deepseek-ai/dsh@0.1.0-rc.6` + `@deepseek-ai/dsh-web-frontend@0.0.1-rc.5`）。**升级引擎 = 改 LOCKED 后重跑脚本**。两个包必须装在同一棵 node_modules——上游 `dsh-web-app` 用 `require.resolve('@deepseek-ai/dsh-web-frontend/dist/index.html')` 定位前端 dist。
+- **安装路径**：主路径 npm registry；失败（断网/包缺失）时若有 `DSH_CHECKOUT` 环境变量，走兜底——在 checkout 里 `pnpm install && pnpm build`，对 `apps/cli`、`apps/web` `pnpm pack` 成 tarball 后安装（pnpm pack 会把 workspace: 依赖改写为具体版本）。包管理器优先 npm，其次 PATH 上的 pnpm。
+- **原子换装**：已存在引擎时先装进 `resources/engine.new` → 校验（dsh bin + 前端 dist/index.html 存在）→ rename 换入（旧引擎先改名 `.old`，换入失败自动回滚）→ 删除 `.old`。中途失败不破坏旧引擎（Phase 5 验收项）。
+- **prebuilds 剪枝**（`pruneForeignPrebuilds`，导出函数可直接测试）：删除 node_modules 里非当前平台的 `prebuilds/<platform>-<arch>/` 目录——node-pty 一家就省 ~58MB win32 二进制（引擎 352M → 294M）。保守策略：只有 `prebuilds/` 根内含当前平台目录时才剪，根级文件不碰。
+- 安装结果写 `resources/engine/engine.json`（时间、来源、版本），排查「升级没生效」先看它。
+- 引擎目录在 `.gitignore`（构建期产物），本地和 CI 都先跑 install-engine 再打包。
+
+### 4.5 插件管理管线（plugins.ts）
+
+- 面板操作 → IPC（`plugins:*`）→ `PluginManager` → `spawnSync(node, ['--expose-internals', dshBin, 'plugin', '--profile', 'web', add|remove|update, ...])`（300s 超时）→ 成功则自动重启引擎。
+- **为什么壳不自己实现插件机制**：加载/注册/分层/reconcile/HMR 全是上游实现（Cordis 插件树）。壳只做「调命令、捕获输出、编排重启」（AD-6/AD-7），这是项目成立的根基，别在壳里复制机制。
+- **打包态怎么跑 pnpm**（AD-8，`cliCommandEnv`）：用户机器可能没有 Node/pnpm。壳在 userData 下建 `runtime-bin/`：`node` 符号链接 → Electron 二进制（配 `ELECTRON_RUN_AS_NODE=1` 就是 Node）；再写一个 `pnpm` 启动脚本 → `exec <Electron二进制> <asar 内 pnpm.cjs> "$@"`。PATH 前置 runtime-bin 后，`dsh plugin` 无系统依赖也能执行。shim 写失败是非致命的（有系统 pnpm 时照常跑）。
+- `list()` 读 profile manifest（`$DSH_HOME/profiles/web/package.json` 的 dependencies + `dsh.profile.bundles`）展示已装插件；`TEMPLATE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']` 是 web profile 模板自带层，标记 template 不可卸载。
+- `scaffold(name)` 生成模板到 `$DSH_HOME/plugins-local/<name>/`（package.json 声明 `dsh.bundle` patch 层 + `lib/index.js` 函数插件 + `cordis.patch.yml`），随后自动 `file:` 安装（详见 §7）。
+
+### 4.6 打包（electron-builder.yml）
+
+- `files` 白名单只有 `dist/**/*`、`scripts/**/*.mjs`、`package.json`。scripts 进 asar 是为了打包态「应用引擎更新」（`updater:apply`）能跑到 install-engine.mjs。
+- `extraResources` **两条 from**：`resources/engine` → `engine`，`resources/engine/node_modules` → `engine/node_modules`。为什么拆两条：electron-builder 的 filter.js 会把 from 源下**根级 `node_modules` 整个剪掉**（规则 `relative === "node_modules"`），而引擎的依赖树恰恰是根级 node_modules——拆成独立源后子条目不再以 node_modules 开头，得以保留。引擎放 Resources 而非 asar 内：原生模块和 `require.resolve` 需要真实文件路径。**这条是实测踩出来的坑，别「简化」回去。**
+- `npmRebuild: false`——引擎重编由 rebuild-engine.mjs 负责，避免 electron-builder 全树瞎重编。
+- mac `target: [dmg, zip]`：**zip 是 electron-updater 增量更新必需**（dmg 不能差分；blockmap 由此生成）。
+- 三平台产物必须**各自在对应平台构建**（原生模块平台相关：mac 交叉打 Linux 缺 landlock addon，Windows 需 Wine），正式发布走 CI 三平台矩阵，本机 `pnpm pack` 只出当前平台产物。
+
+### 4.7 设置与更新
+
+- `config.ts`：`<userData>/settings.json`，原子写（tmp + rename）。字段：`checkoutPath`（开发模式引擎来源）、`inspectPort`（给引擎加 `NODE_OPTIONS=--inspect=<port>`，Chrome DevTools attach）、`autoCheckUpdates`（默认关）。
+- `updater.ts`：`latestEngineVersion()` 查 npm registry；`installedEngineVersion()` 读引擎包版本；`backupDshHome()` 把 `$DSH_HOME` 复制成 `$DSH_HOME-backup-<时间戳>`。
+- `updater:apply`（IPC）：spawn `install-engine.mjs` → `rebuild-engine.mjs`（各 600s 超时）→ 重启引擎。**升级前先备份 `$DSH_HOME`**——上游预发布期 `SESSION_FORMAT_VERSION=0`，数据格式不承诺兼容。
+
+### 4.8 安全模型
+
+- 所有 BrowserWindow：`contextIsolation: true` + `nodeIntegration: false` + `sandbox: true`；renderer 只有 preload 桥出的 `dshDesktop.*` API，无任何 Node 能力。
+- 状态壳页面 CSP：`default-src 'self'; style-src 'self' 'unsafe-inline'`。引擎 UI 是引擎自己服务的页面（原样复用上游），不套壳的 CSP。
+- 引擎进程由壳 spawn，同用户权限；插件代码在引擎进程内运行（≈ 本机 shell 权限）——文档里始终提示用户只装可信插件。
+
+## 5. 本地开发工作流
+
+### 5.1 环境准备
+
+- Node ≥ 22.19（本项目在 Node 26 + pnpm 11 上开发）、pnpm。
+- 网络：GitHub 直连不稳时用 `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/` 下载 Electron 二进制。
+
+### 5.2 常用命令
+
+| 命令 | 作用 | 何时跑 |
+|---|---|---|
+| `pnpm install` | 装壳依赖 | 首次 / 改依赖 |
+| `pnpm run install-engine` | 装锁定版本引擎到 resources/engine（registry 主路径，首次约 7 分钟） | 首次、升级引擎、CI |
+| `pnpm run rebuild-engine` | 重编引擎原生模块 | 换 Electron 版本后 |
+| `pnpm run smoke` | 引擎冒烟（Electron-as-Node boot + 健康检查 + 优雅退出） | 动过引擎/安装逻辑后 |
+| `pnpm dev` | build + 启动壳（状态壳 → 自动加载引擎 UI） | 日常开发 |
+| `pnpm run typecheck` / `pnpm run lint` | 静态检查 | 提交前 |
+| `pnpm pack` | build + electron-builder 出**当前平台**产物到 release/ | 打本地自测包 |
+
+### 5.3 环境坑速查（都踩过）
+
+- pnpm 报 `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY` 或 `ERR_PNPM_OUTDATED_LOCKFILE` → `CI=true pnpm install --no-frozen-lockfile`。
+- 启动秒退、无任何日志（exit 0）→ 单实例锁被残留实例占着：`pkill -f dsh-desktop` 后重试。
+- 引擎 boot 报裸插件包名 `ERR_MODULE_NOT_FOUND` → `--expose-internals` 漏加（§4.1）。
+- `electron .` 无窗口无日志 → 检查是否有第二个实例/开发目录路径。
+- 打包崩溃 `Cannot read properties of undefined (reading 'ReadWrite')` → `@electron/get` 覆盖被移除（§2）。
+
+## 6. 测试与验证
+
+### 6.1 smoke.mjs
+
+用 `require('electron')` 拿 Electron 二进制，按壳完全相同的参数（`--expose-internals` + `--profile web --port 0` + `ELECTRON_RUN_AS_NODE=1`）boot 引擎，断言：URL 行 60s 内出现 → HTTP 200 → 页面含 `__DSH_BOOT__` → SIGTERM 后 10s 内干净退出（code 0 或 signal SIGTERM）。**任何引擎相关改动后跑它。**
+
+### 6.2 插件全流程（test/fixtures/hello-bundle）
+
+验证「壳的插件管线没被上游机制变化打破」的最小回归：`dsh plugin --profile web add file:<fixture 绝对路径>` → profile manifest 的 bundles 自动 reconcile（`[dsh-base, dsh-web-app, dsh-hello-bundle]`）→ 重启引擎 → 日志出现 `[hello-bundle] mounted` → `remove` 后 bundles 恢复原状（2026-08-16 实测通过）。fixture 结构即最小 bundle 插件范例（§7.2）。
+
+### 6.3 CI（.github/workflows/build.yml）
+
+三平台矩阵（macos / windows / ubuntu），每台机器上按序执行：lint → typecheck → install-engine → rebuild-engine → build → smoke → pack → 上传 `release/*` 产物（`if-no-files-found: error`）。**正式发布物由 CI 出**；本机 pack 仅自测当前平台。
+
+### 6.4 改了什么跑什么（检查清单）
+
+| 改动 | 必跑 |
+|---|---|
+| main 逻辑（harness/plugins/tools/config/updater） | `typecheck` + `lint` + `dev` 手测 |
+| 引擎安装/升级逻辑、`LOCKED` 版本 | `install-engine` + `smoke`（再打包产物实机 boot） |
+| 打包配置（electron-builder.yml） | `pack` + 打开产物验证（`.app` 直跑：`release/mac/dsh-desktop.app/Contents/MacOS/dsh-desktop`） |
+| preload / renderer | `build` 后 `dev` 手测两个窗口 |
+| 插件机制相关 | §6.2 fixture 全流程 |
+
+## 7. dsh 插件开发（结合本项目测试与调试）
+
+插件的加载、注册、分层、HMR 全部由上游实现（Cordis 插件树），本壳只负责「装、卸、重启、观察」。写插件前先读上游 cookbook（`docs/cookbook/adding-a-package.md`、`docs/cookbook/extension-cookbook.md`）。
+
+### 7.1 三类插件与生效方式
+
+| 类型 | 声明 | 生效 | 需重启？ |
+|---|---|---|---|
+| **宿主插件**（工具/服务/事件，Node 进程内） | 普通 npm 包，入口被 loader 挂载 | 代码改动 | 是（boot 数秒，代价小） |
+| **bundle 插件**（分层补丁） | package.json `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }` | 安装后自动进 profile bundles 分层；patch 行可再被用户层覆盖 | 装/卸后是（壳自动重启） |
+| **客户端插件**（web UI 组件） | package.json 声明 `dsh.client`，bundle 有浏览器半 | 重建 bundle；开发模式（checkout + `pnpm run dev:web`）下 client-hmr 自动热更新 | 开发模式否；发布模式重启+刷新 |
+
+### 7.2 端到端流程（结合本项目面板）
+
+1. **脚手架**：管理窗口 → 插件管理 → 「新建插件」输入名字（小写字母/数字/连字符）→ 模板生成到 `$DSH_HOME/plugins-local/<name>/` 并自动安装（`file:` 链接 + 重启引擎）。模板三件套：
+   - `package.json`：`"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }` + `exports` 暴露 `./entry`；
+   - `lib/index.js`：函数插件——`export const name` / `inject` / `apply(ctx, config)`（挂载时打日志，可 `ctx.provide` 提供服务）；
+   - `cordis.patch.yml`：insert 一行 `{ id, name: <name>/entry }` 把入口挂进 web profile。
+2. **改代码（宿主插件）**：改 `lib/index.js` → 管理窗口「重新加载引擎」（或菜单 Cmd/Ctrl+R）→ 看日志确认 `[<name>] mounted`。
+3. **配置调整**：管理窗口 → 调试工具 → 补丁编辑器改 `cordis.patch.yml`——**配置改动 HMR 热生效**（不用重启）；结构性改动（增删行/换 id）保存时提示重启，面板一键重启。
+4. **客户端插件**：设置里配 checkout 路径 + checkout 里跑 `pnpm run dev:web` → 浏览器半改代码自动 HMR（已知限制如实告知用户：热重载丢组件内 React state、失败无回滚）。
+5. **调试手段**（管理窗口 → 调试工具）：
+   - 实时日志（stdout+stderr，500 行环形缓冲回放，可清空/导出）；
+   - 配置树 `--dump-config` + 装前/后 diff——确认行在正确的分层位置，定位「为什么没生效」；
+   - 启动失败自动诊断（`diagnoseStartupFailure` 模式匹配，指名插件/缺包/pnpm/网络错误）；
+   - 高级断点：设置 → 引擎调试端口 → Chrome DevTools attach `chrome://inspect`（壳只透传 `NODE_OPTIONS`，零侵入）。
+6. **验证清单**：插件列表出现该行（bundle 标记）→ 引擎日志无报错 + 挂载日志 → 配置树分层正确 → web UI 设置页插件清单（Loader 只读投影）可读。
+7. **发布**：`npm publish`。用户按包名安装；`dsh plugin` 自动 reconcile，`update` 也能激活「新版本才声明 bundle」的包。
+
+### 7.3 测试插件时的注意事项
+
+- **本地目录安装必须绝对路径**：上游 `anchorPathSpec` 会把相对路径锚到调用 cwd；`file:` 链接安装后改代码重建即生效（重启引擎）。
+- **git 依赖被 pnpm ≥10 拦 prepare 脚本** → 按提示在 profile 的 `pnpm-workspace.yaml` 配 `allowBuilds`。
+- **原生依赖**：node-gyp 模块在 Electron 内嵌 Node 下可能需要 `@electron/rebuild`（`pnpm run rebuild-engine` 对 `resources/engine` 全树处理）；优先用 N-API 免重编。
+- **安全边界**：插件代码与 shell 同权，只装可信来源的插件——这是产品文档和代码注释里都要反复强调的点。
+
+## 8. 维护速查
+
+| 任务 | 步骤 |
+|---|---|
+| 升级引擎版本 | 改 `scripts/install-engine.mjs` 的 `LOCKED` → `pnpm run install-engine` → `pnpm run rebuild-engine` → `pnpm run smoke` → 打包验证 |
+| 升级 Electron | 改 package.json 版本 → `CI=true pnpm install --no-frozen-lockfile` → 核对内嵌 Node 满足引擎 engines（≥ 40 = Node 24）→ `rebuild-engine` → `smoke` |
+| 新增管理窗口功能 | 后端放 electron-free 模块（路径注入）→ index.ts 加 IPC handler → preload.cjs 加桥方法 → manager.html/js 加控件 |
+| 出正式发布物 | 推 main 触发 CI 三平台矩阵 → 下载各平台产物 → mac 公证（未配）→ 传 GitHub Releases（配合 electron-updater） |
+| 排查引擎问题 | 管理窗口日志 → `$DSH_HOME` 结构 → `resources/engine/engine.json`（来源/版本）→ 复现时用 `DSH_ENGINE_BIN` 指到可疑入口 |
