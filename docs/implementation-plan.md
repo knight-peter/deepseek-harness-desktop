@@ -103,7 +103,7 @@ resources/
 1. **npm registry（主路径）**：`npm install @deepseek-ai/dsh@<锁定版本> @deepseek-ai/dsh-web-frontend@<锁定版本>`。已核实（2026-08-14，registry.npmjs.org）：`@deepseek-ai/dsh` 存在且为公开包，首次发布 2026-08-10，`dist-tags.latest`/`next` 均为 `0.1.0-rc.6`（比当前 checkout 的 `0.1.0-rc.5` 更新）；`@deepseek-ai/dsh-web-frontend`、`dsh-web-app`、`dsh-base`、`dsh-host-webserver` 等关键依赖均存在。registry 包内容即上游 build 产物（`lib/` + `dist/`）——发布版引擎**不是**手动拷贝 dist，而是由 npm 按依赖图搬运同一批产物。
 2. **上游构建兜底**：并非全部包都已发布（已核实 `@deepseek-ai/dsh-sdk-server` 404，发布集随时间变化）。所需包缺失时：锁定上游 commit → `pnpm install && pnpm build` → 对缺失包 `npm pack` 打成 tarball → `npm install <tarball>` 进同一 `resources/engine`。内容等价于路径 1，仅搬运来源不同。
 
-两条路径运行时无感；`scripts/install-engine.ts` 统一实现「先查 registry，缺失则走构建兜底」。
+两条路径运行时无感；`scripts/install-engine.ts` 统一实现「先查 registry，缺失则走构建兜底」。**体积剪枝（2026-08-16）**：安装后自动删除非当前平台的 `prebuilds/` 目录（node-pty 等 node-gyp-build 包的跨平台预编译二进制，本机实测省 ~58MB：352M → 294M）；保守策略——仅当 `prebuilds/` 内含当前平台目录时才剪，剪枝后 `smoke` 通过。
 
 ### 3.4 运行时选择：Electron 内嵌 Node（决策记录，2026-08-14）
 
@@ -216,7 +216,7 @@ dsh-desktop/
 | Phase | 状态 | 说明 |
 |---|---|---|
 | 0–1 | ✅ | 可运行壳；引擎托管闭环验收项全部实测通过（含 `--expose-internals` 修复） |
-| 2 | ⚠️ | mac 本机全链路通过（install-engine 588 包 / rebuild-engine / smoke PASS / 零环境变量出 UI，含原子换装）；win/linux 平台产物待 CI 构建验证 |
+| 2 | ⚠️ | mac 本机全链路通过（install-engine 588 包 / rebuild-engine / smoke PASS / 零环境变量出 UI，含原子换装 + 跨平台 prebuilds 剪枝省 58MB）；win/linux 平台产物待 CI 构建验证 |
 | 3 | ✅ | `plugins.ts` + 管理窗口；fixture `dsh-hello-bundle` 装 → reconcile → 挂载 → 卸 全流程实测通过 |
 | 4 | ✅ | `tools.ts`：dump-config（15KB 组合树）、LCS diff、patch 校验（容忍 `!!js`）；实时日志面板（环形缓冲回放 + 导出）；启动失败诊断（`diagnoseStartupFailure`） |
 | 5 | ✅ | 版本检查 / `$DSH_HOME` 备份 / 引擎重装已实现并实测；原子换装 + npm→pnpm 兜底（2026-08-16）；electron-updater 已接线（发布版启用） |

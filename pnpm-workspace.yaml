@@ -1,4 +1,9 @@
+# electron-builder 26.15.3 references ElectronDownloadCacheMode, which only
+# exists in @electron/get >= 5; its own declared ^3.0.0 range resolves to a
+# version missing the export (upstream dependency-declaration bug).
+overrides:
+  '@electron/get': 5.1.0
 allowBuilds:
-  electron-winstaller: set this to true or false
+  electron-winstaller: false
 minimumReleaseAgeExclude:
   - pnpm@11.22.0

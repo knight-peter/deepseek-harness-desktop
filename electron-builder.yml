@@ -1,8 +1,9 @@
-# dsh-desktop packaging: three-platform targets; the engine and (fallback)
-# bundled Node live under resources/ and must stay unpacked for real file
-# paths (require.resolve + native addons). scripts/ ships with the app so
-# the in-app engine update (`updater:apply`) can run install-engine.mjs from
-# the asar.
+# dsh-desktop packaging: three-platform targets. The engine lives outside
+# the asar: extraResources copies resources/engine (and the fallback
+# resources/node) into the app bundle's Resources dir, exactly where the
+# runtime looks (`process.resourcesPath/engine`) and with real file paths
+# for require.resolve + native addons. scripts/ ships inside the asar so the
+# in-app engine update (`updater:apply`) can run install-engine.mjs.
 appId: ai.deepseek.dshdesktop
 productName: dsh-desktop
 directories:
@@ -11,9 +12,14 @@ files:
   - dist/**/*
   - scripts/**/*.mjs
   - package.json
-asarUnpack:
-  - resources/engine/**
-  - resources/node/**
+extraResources:
+  # electron-builder prunes a root-level `node_modules` under an extraResources
+  # source (filter.js root-relative rule), so the engine's dependency tree is
+  # declared as its own source whose children never start with `node_modules`.
+  - from: resources/engine
+    to: engine
+  - from: resources/engine/node_modules
+    to: engine/node_modules
 npmRebuild: false
 mac:
   category: public.app-category.developer-tools

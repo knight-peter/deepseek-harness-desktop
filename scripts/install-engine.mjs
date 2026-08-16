@@ -16,7 +16,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -103,6 +103,65 @@ function verify(dir) {
   console.log(`install-engine: verified ${dist}`)
 }
 
+/**
+ * Drop foreign-platform prebuilds (node-gyp-build layout:
+ * `prebuilds/<platform>-<arch>/`). node-pty alone ships ~58MB of win32
+ * binaries that this tree will never load. Conservative: a `prebuilds` root
+ * is pruned only when it contains the current platform's directory; files at
+ * the root are never touched. Exported for direct testing.
+ */
+export function pruneForeignPrebuilds(dir) {
+  const roots = []
+  const walk = (current) => {
+    let entries
+    try {
+      entries = readdirSync(current)
+    } catch {
+      return
+    }
+    for (const name of entries) {
+      if (name.startsWith('.')) continue
+      const path = join(current, name)
+      let stat
+      try {
+        stat = statSync(path)
+      } catch {
+        continue
+      }
+      if (!stat.isDirectory()) continue
+      if (name === 'prebuilds') roots.push(path)
+      else walk(path)
+    }
+  }
+  walk(dir)
+
+  const platformPrefix = `${process.platform}-${process.arch}`
+  const muslPrefix = `${process.platform}musl-${process.arch}`
+  let removed = 0
+  let prunedRoots = 0
+  for (const root of roots) {
+    const entries = readdirSync(root)
+    if (!entries.some((entry) => entry.startsWith(platformPrefix) || entry.startsWith(muslPrefix))) continue
+    for (const entry of entries) {
+      if (entry.startsWith(platformPrefix) || entry.startsWith(muslPrefix)) continue
+      const path = join(root, entry)
+      let stat
+      try {
+        stat = statSync(path)
+      } catch {
+        continue
+      }
+      if (!stat.isDirectory()) continue
+      rmSync(path, { recursive: true, force: true })
+      removed++
+    }
+    prunedRoots++
+  }
+  if (removed > 0) {
+    console.log(`install-engine: pruned ${removed} foreign prebuild dir(s) across ${prunedRoots} package(s)`)
+  }
+}
+
 function writeManifest(source, dir = ENGINE_DIR) {
   writeFileSync(join(dir, 'engine.json'), `${JSON.stringify({ installedAt: new Date().toISOString(), source, packages: LOCKED }, null, 2)}\n`)
 }
@@ -126,6 +185,7 @@ function main() {
     fail('both registry and checkout fallback failed — the existing engine (if any) is untouched')
   }
 
+  pruneForeignPrebuilds(target)
   verify(target)
 
   if (target === STAGING_DIR) {
@@ -146,4 +206,6 @@ function main() {
   console.log('install-engine: done')
 }
 
-main()
+if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+  main()
+}

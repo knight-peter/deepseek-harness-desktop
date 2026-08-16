@@ -339,15 +339,23 @@ ipcMain.handle('updater:engine-version', async () => ({
 }))
 ipcMain.handle('updater:backup', () => backupDshHome({ engineDir: engineDir(), dshHome: dshHome() }))
 ipcMain.handle('updater:apply', async () => {
-  const script = join(app.getAppPath(), 'scripts', 'install-engine.mjs')
-  const result = spawnSync(process.execPath, [script], {
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    encoding: 'utf8',
-    timeout: 600_000,
-  })
-  const ok = result.status === 0
+  const scripts = ['install-engine.mjs', 'rebuild-engine.mjs']
+  let output = ''
+  let ok = true
+  for (const script of scripts) {
+    const result = spawnSync(process.execPath, [join(app.getAppPath(), 'scripts', script)], {
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      encoding: 'utf8',
+      timeout: 600_000,
+    })
+    output += `${result.stdout ?? ''}${result.stderr ?? ''}`
+    if (result.status !== 0) {
+      ok = false
+      break
+    }
+  }
   if (ok) await restartEngine()
-  return { ok, output: `${result.stdout ?? ''}${result.stderr ?? ''}` }
+  return { ok, output }
 })
 
 // ── lifecycle ──────────────────────────────────────────────────────────────
