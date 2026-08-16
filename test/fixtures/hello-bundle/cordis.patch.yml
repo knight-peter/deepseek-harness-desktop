@@ -1,0 +1,4 @@
+# Fixture bundle patch: mounts the hello-bundle entry as one web-profile row.
+- insert:
+    - id: hello-bundle
+      name: dsh-hello-bundle/entry

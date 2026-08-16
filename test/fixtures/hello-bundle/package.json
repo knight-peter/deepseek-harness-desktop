@@ -1,0 +1,19 @@
+{
+  "name": "dsh-hello-bundle",
+  "version": "0.0.1",
+  "description": "Test bundle fixture for dsh-desktop plugin flow (declares dsh.bundle)",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./entry": "./lib/index.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ]
+}

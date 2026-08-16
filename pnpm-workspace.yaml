@@ -1,2 +1,4 @@
 allowBuilds:
   electron-winstaller: set this to true or false
+minimumReleaseAgeExclude:
+  - pnpm@11.22.0

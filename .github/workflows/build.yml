@@ -1,0 +1,57 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint and typecheck
+        run: |
+          pnpm run lint
+          pnpm run typecheck
+
+      - name: Install engine (registry, pinned)
+        run: pnpm run install-engine
+
+      - name: Rebuild engine native modules for Electron
+        run: pnpm run rebuild-engine
+
+      - name: Build shell
+        run: pnpm run build
+
+      - name: Engine smoke (Electron-as-Node boot + health + shutdown)
+        run: pnpm run smoke
+
+      - name: Package
+        run: pnpm run pack
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-desktop-${{ matrix.os }}
+          path: release/*
+          if-no-files-found: error

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'" />
+  <title>dsh-desktop 管理</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font: 13px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #14161a; color: #d6d9de; }
+    nav { display: flex; gap: 4px; padding: 8px 12px; border-bottom: 1px solid #2a2e35; }
+    nav button { border: 0; background: transparent; color: #9aa2af; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    nav button.active { background: #23272f; color: #fff; }
+    section { display: none; padding: 14px 16px; }
+    section.active { display: block; }
+    h2 { margin: 0 0 10px; font-size: 14px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #23272f; }
+    th { color: #9aa2af; font-weight: 500; }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; }
+    .badge.bundle { background: #1f6feb33; color: #79b8ff; }
+    .badge.template { background: #3fb95033; color: #56d364; }
+    input, select, textarea { background: #0d0f12; border: 1px solid #2a2e35; color: #d6d9de; border-radius: 6px; padding: 6px 10px; font: inherit; }
+    input[type="text"] { width: 320px; }
+    textarea { width: 100%; box-sizing: border-box; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+    button { background: #2a2e35; color: #d6d9de; border: 1px solid #3a3f47; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+    button:hover { background: #343a44; }
+    button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+    .muted { color: #8b93a1; font-size: 12px; }
+    pre { background: #0d0f12; border: 1px solid #2a2e35; border-radius: 6px; padding: 10px; overflow: auto; max-height: 46vh; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+    #action-log { margin-top: 10px; max-height: 120px; overflow-y: auto; }
+    .log-stderr { color: #f0883e; }
+    .ok { color: #56d364; } .err { color: #f85149; }
+    label { display: inline-flex; gap: 6px; align-items: center; }
+  </style>
+</head>
+<body>
+  <nav>
+    <button data-tab="plugins" class="active">插件管理</button>
+    <button data-tab="debug">调试工具</button>
+    <button data-tab="settings">设置与更新</button>
+  </nav>
+
+  <section id="tab-plugins" class="active">
+    <h2>已安装插件（$DSH_HOME/profiles/web）</h2>
+    <table id="plugin-table">
+      <thead><tr><th>包名</th><th>版本</th><th>类型</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="row">
+      <select id="install-kind">
+        <option value="npm">npm 包</option>
+        <option value="dir">本地目录</option>
+        <option value="git">git 仓库</option>
+      </select>
+      <input type="text" id="install-spec" placeholder="如 @scope/pkg、/abs/path、git+https://…" />
+      <button class="primary" id="install-btn">安装</button>
+      <button id="refresh-btn">刷新</button>
+      <button id="open-profile-btn">打开 profile 目录</button>
+    </div>
+    <p class="muted">安装/卸载/更新后会自动重启引擎。本地目录请填绝对路径（file: 链接）；git 依赖若被 pnpm 拦截 prepare 脚本，需在 profile 的 pnpm-workspace.yaml 配置 allowBuilds。</p>
+    <div id="action-log"></div>
+  </section>
+
+  <section id="tab-debug">
+    <h2>引擎日志（实时）</h2>
+    <pre id="log-view">— 引擎日志 —</pre>
+    <div class="row">
+      <button id="reload-engine-btn">重新加载引擎</button>
+    </div>
+    <h2>配置树（--dump-config）</h2>
+    <div class="row">
+      <button id="dump-btn">查看配置树</button>
+      <button id="dump-diff-btn">配置树 diff（与上次对比）</button>
+      <span class="muted">注意：dump 只反映配置组合；行级增删需重启引擎生效</span>
+    </div>
+    <pre id="dump-view">— 未生成 —</pre>
+    <h2>补丁文件（cordis.patch.yml）</h2>
+    <div class="row">
+      <select id="patch-target">
+        <option value="profile">profile 级（profiles/web/cordis.patch.yml）</option>
+        <option value="home">home 级（$DSH_HOME/cordis.patch.yml）</option>
+      </select>
+      <button id="patch-load-btn">加载</button>
+      <button class="primary" id="patch-save-btn">校验并保存</button>
+      <span id="patch-status"></span>
+    </div>
+    <textarea id="patch-editor" rows="12" spellcheck="false" placeholder="— 未加载 —"></textarea>
+    <p class="muted">配置改动由 profile patch HMR 热生效；结构性改动（增删行）会提示重启引擎。</p>
+  </section>
+
+  <section id="tab-settings">
+    <h2>开发模式</h2>
+    <div class="row">
+      <input type="text" id="checkout-path" placeholder="deepseek-harness checkout 路径（开发模式引擎来源）" style="width:420px" />
+      <button id="checkout-save">保存</button>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="inspect-enabled" /> 引擎调试端口（NODE_OPTIONS=--inspect）</label>
+      <input type="number" id="inspect-port" value="9229" min="1" max="65535" style="width:90px" />
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="auto-update-check" /> 启动时自动检查应用更新（仅发布版）</label>
+    </div>
+    <p class="muted">开发模式下引擎来源优先级：DSH_ENGINE_BIN 环境变量 → resources/engine 打包引擎 → DSH_CHECKOUT 环境变量 → 上方保存的 checkout 路径。</p>
+    <h2>引擎版本与更新</h2>
+    <div class="row">
+      <span id="engine-version" class="muted">—</span>
+      <button id="version-check-btn">检查更新</button>
+      <button id="backup-btn">备份 $DSH_HOME</button>
+      <button class="primary" id="apply-update-btn">应用引擎更新（重装 resources/engine）</button>
+    </div>
+    <div id="update-result"></div>
+  </section>
+
+  <script src="./manager.js"></script>
+</body>
+</html>

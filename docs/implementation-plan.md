@@ -2,7 +2,7 @@
 
 DeepSeek Harness 的 Electron 桌面壳。壳负责托管引擎、提供窗口、管理插件与更新；业务功能 100% 复用上游 `dsh web` 原版，上游仓库的持续更新不影响壳。
 
-- 状态：Phase 0–1 实施中（2026-08-14）
+- 状态：Phase 0–6 已实施并验证，Phase 7 部分完成（CI + 文档；签名/发布通道待定）（2026-08-16）
 - 上游：https://github.com/deepseek-ai/deepseek-harness（下文简称「上游」）
 - 上游版本基线：checkout `0.1.0-rc.5`；npm `latest` 已到 `0.1.0-rc.6`（2026-08-14 核实）
 - 相关讨论：见本仓库 `docs/` 后续补充的设计笔记
@@ -142,6 +142,8 @@ resources/
 
 卸载/更新 = `dsh plugin --profile web remove|update <pkg>`。注册动作（reconcile `dsh.profile.bundles`）全部由上游完成，壳只读回 profile manifest 展示状态。
 
+**实测（2026-08-16）**：fixture bundle（`test/fixtures/hello-bundle`）走通全流程——`add file:<绝对路径>` → bundles 自动 reconcile（`[dsh-base, dsh-web-app, dsh-hello-bundle]`）→ 引擎重启后挂载日志 `[hello-bundle] mounted` 出现 → `remove` 后 bundles 恢复原状。
+
 ### 4.3 调试
 
 - **日志面板**：捕获引擎 stdout/stderr，tail / 过滤 / 导出。启动失败行、pnpm 输出都在里面。
@@ -165,6 +167,7 @@ resources/
 
 - **数据安全**：升级只换引擎，`$DSH_HOME` 原样保留（上游设计保证）。
 - **引擎更新**：面板/自动检查 npm registry 最新版（对比锁定版本）→ 后台安装进 `resources/engine/` → 重启引擎。**升级前自动备份 `$DSH_HOME` 一次**（预发布期 `SESSION_FORMAT_VERSION=0` 不承诺兼容）。
+  - **已知限制**：`updater:apply` 复用 `scripts/install-engine.mjs`，其 npm install 依赖机器上的 npm；打包态无 npm 的机器需改用内置 pnpm（遗留项，见 §10）。
 - **运行时版本联动**：Electron 升级会同时更换内嵌 Node major（39 = Node 22，40 起 = Node 24）；升级前核对引擎 engines（`^22.19 || >=24`），不满足则禁止升级（§3.4）。
 - **应用更新**：electron-updater 走 GitHub Releases（壳自身）。
 - **开发模式**：指向 checkout，`git pull` 即可，壳无感。
@@ -173,32 +176,51 @@ resources/
 
 ```
 dsh-desktop/
-├─ package.json            # deps: pnpm（自带）；devDeps: electron, electron-builder, TS
+├─ package.json            # deps: js-yaml / pnpm / electron-updater；devDeps: electron, electron-builder, TS
 ├─ electron-builder.yml    # 三平台打包配置（asarUnpack: resources/engine）
+├─ .github/workflows/build.yml  # CI：lint/typecheck/install-engine/rebuild/smoke/pack
 ├─ .gitignore
 ├─ docs/
 │  ├─ implementation-plan.md   # 本文档
-│  └─ ...                       # 后续设计笔记
+│  ├─ user-guide.md            # 用户指南
+│  └─ plugin-authoring.md      # 插件作者指南
 ├─ src/
 │  ├─ main/
-│  │  ├─ index.ts           # 生命周期、单实例锁、托盘、窗口
+│  │  ├─ index.ts           # 生命周期、单实例锁、菜单、窗口、IPC、更新接线
 │  │  ├─ harness.ts         # 引擎子进程管理（§3.2）
+│  │  ├─ config.ts          # 设置持久化（settings.json）
 │  │  ├─ plugins.ts         # 插件管理后端（§4）
-│  │  └─ updater.ts         # 更新（§5）
+│  │  ├─ tools.ts           # dump-config / diff / patch 编辑器（§4）
+│  │  └─ updater.ts         # 版本检查 / 备份 / 重装（§5）
 │  ├─ preload/
-│  │  └─ index.ts           # contextBridge API
+│  │  └─ preload.cjs        # contextBridge API（harness/plugins/tools/settings/updater）
 │  └─ renderer/
-│     └─ ...                # 极薄外壳 UI：菜单栏、插件面板、日志面板、设置
+│     ├─ index.html/js      # 状态壳（启动中/错误/日志；运行后让位 web UI）
+│     └─ manager.html/js    # 管理窗口（插件 / 调试 / 设置 三页签）
 ├─ scripts/
-│  ├─ rebuild-engine.ts     # @electron/rebuild：引擎原生模块按 Electron ABI 重编
-│  ├─ install-engine.ts     # 在 resources/engine 安装锁定版本引擎
-│  └─ smoke.ts              # 打包产物冒烟测试（boot 引擎 + HTTP 检查）
-└─ resources/               # 运行期资源（打包时生成/下载）
+│  ├─ copy-static.mjs       # preload/renderer → dist/
+│  ├─ install-engine.mjs    # resources/engine 安装锁定版本引擎（registry + 构建兜底）
+│  ├─ rebuild-engine.mjs    # @electron/rebuild 引擎原生模块
+│  └─ smoke.mjs             # 引擎冒烟（boot + 健康检查 + 优雅退出）
+├─ test/fixtures/hello-bundle/  # 插件流程 fixture（装/卸实测用）
+└─ resources/               # 运行期资源（install-engine 生成）
 ```
 
 ## 7. 实施阶段
 
 每个阶段的验收标准必须可执行验证；除 Phase 0 外均基于前一阶段产物。
+
+**实施状态（2026-08-16）**：
+
+| Phase | 状态 | 说明 |
+|---|---|---|
+| 0–1 | ✅ | 可运行壳；引擎托管闭环验收项全部实测通过（含 `--expose-internals` 修复） |
+| 2 | ✅ | `install-engine.mjs`（registry 主路径 + DSH_CHECKOUT 构建兜底）安装 588 包；`rebuild-engine.mjs` 已将引擎树 node-pty 按 Electron ABI 重编；`smoke.mjs` PASS；`pnpm dev` 零环境变量从 `resources/engine` 出 web UI |
+| 3 | ✅ | `plugins.ts` + 管理窗口；fixture `dsh-hello-bundle` 装 → reconcile → 挂载 → 卸 全流程实测通过 |
+| 4 | ✅ | `tools.ts`：dump-config（15KB 组合树）、LCS diff、patch 校验（容忍 `!!js`）；实时日志面板 |
+| 5 | ⚠️ | 版本检查 / `$DSH_HOME` 备份 / 引擎重装已实现并实测；打包态重装依赖机器 npm（遗留项见 §10）；electron-updater 已接线（发布版启用） |
+| 6 | ✅ | `config.ts`（settings.json）：checkoutPath / inspectPort / autoCheckUpdates；成为引擎来源第 4 优先级 |
+| 7 | ⚠️ | CI workflow + 用户指南 + 插件作者指南已交付；签名证书与 GitHub Releases 发布通道待定 |
 
 ### Phase 0 — 仓库脚手架
 
@@ -298,4 +320,6 @@ dsh-desktop/
 - [x] 插件面板形态：壳内嵌页 + preload API（渲染层极薄、不引框架；2026-08-14 定）。
 - [x] 自动检查更新：默认关，手动检查（2026-08-14 定）。
 - [ ] 首个 release 的签名证书与发布通道（GitHub Releases）（Phase 7 前再定，不阻塞）。
+- [ ] 打包态引擎升级的 npm 依赖：`updater:apply` 目前需要机器上有 npm；发布版应改用内置 pnpm（`cliCommandEnv` 的 shim 已就位）。
+- [x] 开发模式「使用源码目录」：由设置项落地（§6）；源码 launch（tsx）未做——当前用 checkout 已构建 CLI，行为等价（2026-08-16 定）。
 - [x] Electron 版本：锁定 43.x（Node 24；2026-08-14 当前 stable 43.4.0，见 §3.4）。

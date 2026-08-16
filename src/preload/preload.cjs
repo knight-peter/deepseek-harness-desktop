@@ -1,26 +1,45 @@
 'use strict'
 
-// Sandboxed preload: exposes the harness API to the status shell renderer
-// through the context bridge only — no Node access in the renderer.
+// Sandboxed preload: exposes the harness, plugin, tool, settings, and
+// updater APIs to the status shell and the manager window through the
+// context bridge only — no Node access in the renderer.
 const { contextBridge, ipcRenderer } = require('electron')
 
+function on(channel, callback) {
+  const listener = (_event, payload) => callback(payload)
+  ipcRenderer.on(channel, listener)
+  return () => ipcRenderer.removeListener(channel, listener)
+}
+
 contextBridge.exposeInMainWorld('dshDesktop', {
+  // harness
   getState: () => ipcRenderer.invoke('harness:get-state'),
-  onStateChange: (callback) => {
-    const listener = (_event, state) => callback(state)
-    ipcRenderer.on('harness:state', listener)
-    return () => ipcRenderer.removeListener('harness:state', listener)
-  },
-  onLog: (callback) => {
-    const listener = (_event, entry) => callback(entry)
-    ipcRenderer.on('harness:log', listener)
-    return () => ipcRenderer.removeListener('harness:log', listener)
-  },
-  onErrorDetail: (callback) => {
-    const listener = (_event, detail) => callback(detail)
-    ipcRenderer.on('harness:error-detail', listener)
-    return () => ipcRenderer.removeListener('harness:error-detail', listener)
-  },
+  onStateChange: (callback) => on('harness:state', callback),
+  onLog: (callback) => on('harness:log', callback),
+  onErrorDetail: (callback) => on('harness:error-detail', callback),
   restart: () => ipcRenderer.invoke('harness:restart'),
   quit: () => ipcRenderer.invoke('app:quit'),
+  openManager: () => ipcRenderer.invoke('app:open-manager'),
+
+  // plugins (Phase 3)
+  listPlugins: () => ipcRenderer.invoke('plugins:list'),
+  installPlugin: (spec) => ipcRenderer.invoke('plugins:install', spec),
+  uninstallPlugin: (name) => ipcRenderer.invoke('plugins:uninstall', name),
+  updatePlugin: (name) => ipcRenderer.invoke('plugins:update', name),
+  openProfileDir: () => ipcRenderer.invoke('plugins:open-profile'),
+
+  // tools (Phase 4)
+  dumpConfig: () => ipcRenderer.invoke('tools:dump-config'),
+  dumpDiff: () => ipcRenderer.invoke('tools:dump-diff'),
+  readPatches: () => ipcRenderer.invoke('tools:read-patches'),
+  writePatch: (name, text) => ipcRenderer.invoke('tools:write-patch', name, text),
+
+  // settings (Phase 6)
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  setSettings: (patch) => ipcRenderer.invoke('settings:set', patch),
+
+  // updater (Phase 5)
+  engineVersion: () => ipcRenderer.invoke('updater:engine-version'),
+  backupHome: () => ipcRenderer.invoke('updater:backup'),
+  applyUpdate: () => ipcRenderer.invoke('updater:apply'),
 })

@@ -49,6 +49,7 @@ function appendLog(entry) {
 }
 
 restartButton.addEventListener('click', () => api.restart())
+document.getElementById('manager').addEventListener('click', () => api.openManager())
 document.getElementById('quit').addEventListener('click', () => api.quit())
 
 api.getState().then(render)
