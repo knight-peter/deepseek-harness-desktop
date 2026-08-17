@@ -179,7 +179,7 @@ resources/
 dsh-desktop/
 ├─ package.json            # deps: js-yaml / pnpm / electron-updater；devDeps: electron, electron-builder, TS
 ├─ electron-builder.yml    # 三平台打包配置（asarUnpack: resources/engine）
-├─ .github/workflows/build.yml  # CI：lint/typecheck/install-engine/rebuild/smoke/pack
+├─ .github/workflows/build.yml  # CI：lint/typecheck/install-engine/rebuild/compile/smoke/build(打包)
 ├─ .gitignore
 ├─ docs/
 │  ├─ implementation-plan.md      # 本文档

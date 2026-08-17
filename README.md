@@ -30,15 +30,17 @@ pnpm dev
 ## 命令
 
 ```sh
-pnpm dev              # 构建并启动 Electron 壳
-pnpm build            # tsc 编译 main + 拷贝 preload/renderer 到 dist/
+pnpm dev              # 编译并启动 Electron 壳
+pnpm compile          # 只编译：tsc 编译 main + 拷贝 preload/renderer 到 dist/
+pnpm build            # 打包出最终产物：compile + electron-builder（三平台，产物在 release/）
 pnpm install-engine   # 安装锁定版本引擎到 resources/engine（registry 主路径，DSH_CHECKOUT 构建兜底）
 pnpm rebuild-engine   # @electron/rebuild：引擎原生模块按 Electron ABI 重编
 pnpm smoke            # 引擎冒烟：Electron-as-Node boot + 健康检查 + 优雅退出
 pnpm typecheck
 pnpm lint
-pnpm pack             # 构建 + electron-builder 三平台打包
 ```
+
+> ⚠️ 打包命令是 **`pnpm build`**（或 `pnpm run build`）。不要用 `pnpm pack`——那是 pnpm 内置命令（等价 `npm pack`，打 tarball），不会执行本项目的打包脚本。
 
 ## 文档
 
