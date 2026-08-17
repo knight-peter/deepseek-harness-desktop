@@ -36,6 +36,15 @@ function fail(message) {
   process.exit(1)
 }
 
+/**
+ * Resolve the package-manager command name for this platform. On Windows,
+ * pnpm/npm are `.cmd` shims; Node's spawnSync does not apply PATHEXT, so a
+ * bare `pnpm` ENOENTs. Everything else (darwin/linux) uses the plain name.
+ */
+function pmCommand(pm) {
+  return process.platform === 'win32' ? `${pm}.cmd` : pm
+}
+
 function run(command, args, cwd) {
   const result = spawnSync(command, args, { cwd, stdio: 'inherit' })
   if (result.status !== 0) {
@@ -46,8 +55,8 @@ function run(command, args, cwd) {
 }
 
 function packageManager() {
-  if (spawnSync('npm', ['--version'], { stdio: 'ignore' }).status === 0) return 'npm'
-  if (spawnSync('pnpm', ['--version'], { stdio: 'ignore' }).status === 0) return 'pnpm'
+  if (spawnSync(pmCommand('npm'), ['--version'], { stdio: 'ignore' }).status === 0) return 'npm'
+  if (spawnSync(pmCommand('pnpm'), ['--version'], { stdio: 'ignore' }).status === 0) return 'pnpm'
   return null
 }
 
@@ -55,8 +64,9 @@ function packageManager() {
 function installInto(dir, pm, dependencies) {
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'package.json'), `${JSON.stringify({ name: 'dsh-desktop-engine', private: true, dependencies }, null, 2)}\n`)
-  if (pm === 'npm') return run('npm', ['install', '--no-audit', '--no-fund', '--prefix', dir], dir)
-  return run('pnpm', ['install', '--dir', dir], dir)
+  const cmd = pmCommand(pm)
+  if (pm === 'npm') return run(cmd, ['install', '--no-audit', '--no-fund', '--prefix', dir], dir)
+  return run(cmd, ['install', '--dir', dir], dir)
 }
 
 /** Registry install with pinned versions. */
@@ -72,11 +82,12 @@ function installFromCheckout(dir, pm) {
     return false
   }
   console.log(`install-engine: building checkout at ${checkout}`)
-  if (!run('pnpm', ['install'], checkout)) return false
-  if (!run('pnpm', ['run', 'build'], checkout)) return false
+  const pnpmCmd = pmCommand('pnpm')
+  if (!run(pnpmCmd, ['install'], checkout)) return false
+  if (!run(pnpmCmd, ['run', 'build'], checkout)) return false
   const tarballs = []
   for (const pkgDir of ['apps/cli', 'apps/web']) {
-    const pack = spawnSync('pnpm', ['--dir', pkgDir, 'pack', '--pack-destination', dir], { cwd: checkout, encoding: 'utf8' })
+    const pack = spawnSync(pnpmCmd, ['--dir', pkgDir, 'pack', '--pack-destination', dir], { cwd: checkout, encoding: 'utf8' })
     if (pack.status !== 0) {
       console.error(`install-engine: pnpm pack ${pkgDir} failed (exit ${String(pack.status)})`)
       return false
