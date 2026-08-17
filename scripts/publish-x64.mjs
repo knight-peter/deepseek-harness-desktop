@@ -22,6 +22,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { execSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -49,9 +50,20 @@ function parseArgs(argv) {
     if (argv[i] === '--tag') args.tag = argv[++i] ?? null
     else if (argv[i] === '--arch') args.arch = argv[++i] ?? 'x64'
   }
-  if (args.tag === null) fail('missing --tag <vX.Y.Z>')
   if (args.arch !== 'x64' && args.arch !== 'arm64') fail(`unsupported --arch ${args.arch} (x64|arm64)`)
   return args
+}
+
+/** Latest `v*` git tag (local+remote), or null when none exists. */
+function latestTag() {
+  try {
+    const tags = execSync('git tag --list "v*" --sort=-v:refname', { cwd: ROOT, encoding: 'utf8' })
+      .split('\n')
+      .filter(Boolean)
+    return tags[0] ?? null
+  } catch {
+    return null
+  }
 }
 
 async function gh(path, options = {}) {
@@ -79,6 +91,48 @@ function artifactInfo(filePath) {
 async function getRelease(tag) {
   const release = await gh(`/repos/${OWNER}/${REPO}/releases/tags/${encodeURIComponent(tag)}`)
   return { id: release.id, uploadUrl: release.upload_url.replace(/\{[^}]*\}$/, '') }
+}
+
+/**
+ * Verify the release carries the full set of platform artifacts and update
+ * metadata. Prints a summary and warns about any missing piece — the
+ * publisher stays responsible for deciding whether missing pieces are OK
+ * (e.g. a draft/in-progress release).
+ *
+ * Expected per platform (version `vX.Y.Z`):
+ *   mac arm64:  dsh-desktop-<v>-arm64.dmg, dsh-desktop-<v>-arm64-mac.zip
+ *   mac x64:    dsh-desktop-<v>-x64.dmg,    dsh-desktop-<v>-x64-mac.zip
+ *   windows:    *.exe (nsis) + latest.yml
+ *   linux:      *.AppImage + latest-linux.yml
+ *   mac update: latest-mac.yml
+ */
+async function verifyRelease(releaseId, tag, version) {
+  const assets = await gh(`/repos/${OWNER}/${REPO}/releases/${releaseId}/assets?per_page=100`)
+  const names = assets.map((a) => a.name)
+  const has = (pattern) => names.some((n) => pattern.test(n))
+  const missing = []
+  const report = (label, present) => {
+    console.log(`publish-x64:   ${present ? '✓' : '✗'} ${label}`)
+    if (!present) missing.push(label)
+  }
+
+  console.log(`publish-x64: release ${tag} completeness:`)
+  report(`mac arm64 dmg (${version}-arm64.dmg)`, has(new RegExp(`dsh-desktop-${version}-arm64\\.dmg$`)))
+  report(`mac arm64 zip (${version}-arm64-mac.zip)`, has(new RegExp(`dsh-desktop-${version}-arm64-mac\\.zip$`)))
+  report(`mac x64 dmg (${version}-x64.dmg)`, has(new RegExp(`dsh-desktop-${version}-x64\\.dmg$`)))
+  report(`mac x64 zip (${version}-x64-mac.zip)`, has(new RegExp(`dsh-desktop-${version}-x64-mac\\.zip$`)))
+  report('windows nsis (.exe)', has(/\.exe$/))
+  report('linux AppImage', has(/\.AppImage$/))
+  report('latest-mac.yml (update metadata)', has(/^latest-mac\.yml$/))
+  report('latest.yml (windows update metadata)', has(/^latest\.yml$/))
+  report('latest-linux.yml (linux update metadata)', has(/^latest-linux\.yml$/))
+
+  if (missing.length > 0) {
+    console.warn(`publish-x64: ⚠️ release ${tag} is MISSING: ${missing.join(', ')}`)
+    console.warn('publish-x64:   CI may still be running, or a platform failed. Verify before announcing the release.')
+  } else {
+    console.log(`publish-x64: ✅ release ${tag} is complete (mac x64+arm64 / windows / linux / update metadata)`)
+  }
 }
 
 /** Upload a binary asset; GitHub 422s on a name collision, which we treat as already-present. */
@@ -224,8 +278,14 @@ function exists(path) {
 }
 
 async function main() {
-  const { tag, arch } = parseArgs(process.argv.slice(2))
+  const { tag: tagArg, arch } = parseArgs(process.argv.slice(2))
   if (TOKEN === undefined || TOKEN === '') fail('GH_TOKEN env var is required')
+
+  // Tag resolution: explicit --tag wins; otherwise auto-detect the latest
+  // `v*` tag (so a plain `pnpm run publish-x64` right after `pnpm run release`
+  // targets the version that CI just built).
+  const tag = tagArg ?? latestTag()
+  if (tag === null) fail('no --tag given and no v* git tag found; pass --tag <vX.Y.Z>')
 
   const release = await getRelease(tag).catch((error) => fail(`release ${tag} not found: ${error.message}`))
   console.log(`publish-x64: release ${tag} (id ${release.id})`)
@@ -244,6 +304,8 @@ async function main() {
   await replaceAsset(release.id, release.uploadUrl, 'latest-mac.yml', Buffer.from(ymlText, 'utf8'))
   console.log('publish-x64: latest-mac.yml updated:')
   console.log(ymlText)
+
+  await verifyRelease(release.id, tag, version)
   console.log('publish-x64: done')
 }
 
