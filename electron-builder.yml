@@ -6,6 +6,15 @@
 # in-app engine update (`updater:apply`) can run install-engine.mjs.
 appId: ai.deepseek.dshdesktop
 productName: dsh-desktop
+# electron-updater release source. GitHub Releases is the default provider;
+# owner/repo must match the GitHub repository (update package.json's
+# `repository` field in lockstep). Publishing happens when CI runs with
+# GH_TOKEN and a git tag/draft release is present (electron-builder's
+# default `onTagOrDraft`); plain `pnpm build` never publishes.
+publish:
+  provider: github
+  owner: knight-peter
+  repo: deepseek-harness-desktop
 directories:
   output: release
 files:
@@ -24,6 +33,20 @@ npmRebuild: false
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.icns
+  # Notarization requires the hardened runtime; it is on by default for
+  # non-MAS builds, but we pin it explicitly so the intent is visible.
+  hardenedRuntime: true
+  # Signing: leave `identity` unset — electron-builder searches the keychain
+  # for a certificate and skips signing (with a warning) when none is found.
+  # CI provides the cert via CSC_LINK / CSC_KEY_PASSWORD / CSC_NAME secrets.
+  #
+  # Notarization is opt-in per build via env vars (electron-builder 26 uses
+  # `notarytool`; one of these credential sets activates it, otherwise the
+  # step is skipped with a warning — it never fails the build):
+  #   1. APPLE_API_KEY + APPLE_API_KEY_ID + APPLE_API_ISSUER   (recommended)
+  #   2. APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID
+  #   3. APPLE_KEYCHAIN + APPLE_KEYCHAIN_PROFILE
+  notarize: true
   target:
     # zip is required by electron-updater for macOS auto-updates; dmg alone
     # cannot serve delta updates.

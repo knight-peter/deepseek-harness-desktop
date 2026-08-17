@@ -37,17 +37,26 @@ jobs:
       - name: Rebuild engine native modules for Electron
         run: pnpm run rebuild-engine
 
-      - name: Build shell
-        run: pnpm run build
+      - name: Compile shell (tsc + copy static)
+        run: pnpm run compile
 
       - name: Engine smoke (Electron-as-Node boot + health + shutdown)
         run: pnpm run smoke
 
-      - name: Package
-        run: pnpm run pack
+      - name: Package (electron-builder → release/)
+        run: pnpm run build
         env:
+          # macOS signing: Developer ID certificate (base64 p12 + password).
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          # macOS notarization (electron-builder 26 / notarytool). The mac
+          # job notarizes only when these are configured; otherwise the step
+          # is skipped with a warning and the artifact stays unsigned/unnotarized.
+          # Windows signing uses the same CSC_* vars (Azure Trusted Signing or
+          # p12); leave them unset for unsigned builds.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/upload-artifact@v4
