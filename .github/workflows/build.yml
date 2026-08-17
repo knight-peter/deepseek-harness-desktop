@@ -49,6 +49,10 @@ jobs:
         run: pnpm run smoke
 
       - name: Package (electron-builder → release/)
+        # Explicit bash: the unset guards below are POSIX syntax, but Windows
+        # runners default to PowerShell. GitHub provides Git Bash on all
+        # runners, so pinning shell:bash keeps one code path everywhere.
+        shell: bash
         run: |
           # electron-builder treats an EMPTY CSC_LINK as a certificate path
           # ("allow to specify as empty string"), so an unset secret (GitHub
