@@ -3,7 +3,17 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+
+# Cancel an in-flight run for the same ref when a newer push lands; keeps
+# CI cost down during fast iteration.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -53,6 +63,10 @@ jobs:
         # runners default to PowerShell. GitHub provides Git Bash on all
         # runners, so pinning shell:bash keeps one code path everywhere.
         shell: bash
+        # Publish policy: `--publish never` for plain main pushes (no release
+        # is created/updated); tag pushes (v*) fall back to electron-builder's
+        # default `onTagOrDraft`, which creates/updates the GitHub release and
+        # attaches artifacts. Matches `permissions: contents: write`.
         run: |
           # electron-builder treats an EMPTY CSC_LINK as a certificate path
           # ("allow to specify as empty string"), so an unset secret (GitHub
@@ -61,7 +75,7 @@ jobs:
           # unset them otherwise so cert lookup is skipped cleanly.
           if [ -z "$CSC_LINK" ]; then unset CSC_LINK CSC_KEY_PASSWORD; fi
           if [ -z "$APPLE_ID" ]; then unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; fi
-          pnpm run build
+          pnpm run build ${{ startsWith(github.ref, 'refs/tags/') && '' || '-- --publish never' }}
         env:
           # publish.owner/repo in electron-builder.yml use ${env.GH_OWNER} /
           # ${env.GH_REPO} macros (defined in .env locally); CI has no .env
