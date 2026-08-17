@@ -2,7 +2,10 @@ name: build
 
 on:
   push:
-    branches: [main]
+    # ONLY version tags (v*) trigger the full build+release pipeline. Plain
+    # pushes to any branch do NOT run CI — the release flow is: tag → CI
+    # builds 3 platforms & creates the GitHub release → local Intel x64
+    # artifacts are merged in via scripts/publish-x64.mjs.
     tags: ['v*']
   workflow_dispatch:
 

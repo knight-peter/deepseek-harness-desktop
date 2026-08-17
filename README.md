@@ -36,6 +36,7 @@ pnpm dev              # 编译并启动 Electron 壳
 pnpm compile          # 只编译：tsc 编译 main + 拷贝 preload/renderer 到 dist/
 pnpm build            # 打包出最终产物：compile + electron-builder（本机当前架构，Intel Mac → x64）
 pnpm run publish-x64  # 把本机 x64 产物上传到指定 GitHub release 并合并 latest-mac.yml（用法见下文）
+pnpm run release      # 自动累加版本号 + commit + tag + push，触发发布流程（用法见下文）
 pnpm install-engine   # 安装锁定版本引擎到 resources/engine（registry 主路径，DSH_CHECKOUT 构建兜底）
 pnpm rebuild-engine   # @electron/rebuild：引擎原生模块按 Electron ABI 重编
 pnpm smoke            # 引擎冒烟：Electron-as-Node boot + 健康检查 + 优雅退出
@@ -49,16 +50,21 @@ pnpm lint
 
 mac 双架构策略：**CI（macos-15）出 arm64 包，本机出 x64 包**，两者通过 `scripts/publish-x64.mjs` 合并进同一个 GitHub release（electron-updater 按机器架构自动选包）。
 
+**CI 只在打 `v*` tag 时触发**（workflow `on.push.tags`）；普通 push 不跑 CI。发布流程：打 tag → CI 三平台打包并建 release → 本机 Intel x64 补发。
+
 ### 前置条件
 
 - `.env.local` 里已填 `GH_TOKEN`（fine-grained，仓库权限 Contents: Read and write）；
-- CI 已为某 tag 创建 release（打 tag 推 GitHub 触发，或已有 release）。
+- 工作区干净（bump-version 会拒绝 dirty 状态）。
 
-### 流程
+### 流程（一条命令自动累加版本号）
 
 ```sh
-# 1. 打 tag 并推送（触发 CI 三平台构建 + 自动建 release；已有 release 可跳过）
-git tag v0.1.0 && git push origin v0.1.0
+# 1. 自动累加版本 + commit + tag + push（触发 CI 三平台构建 + 自动建 release）
+pnpm run release                    # v0.1.0 → v0.1.1（默认 patch）
+pnpm run release -- --minor         # → v0.2.0（可选）
+pnpm run release -- --major         # → v1.0.0（可选）
+pnpm run release -- --version 0.3.0 # 显式指定（可选）
 
 # 2. 等 CI 全绿，确认 GitHub Releases 里已有该 tag 的 release
 
@@ -66,12 +72,14 @@ git tag v0.1.0 && git push origin v0.1.0
 pnpm build
 
 # 4. 上传 x64 dmg/zip 到该 release 并合并 latest-mac.yml
-pnpm run publish-x64 --tag v0.1.0
+pnpm run publish-x64 --tag v0.1.1   # --tag 填 release 实际版本
 ```
+
+`bump-version`（`pnpm run release`）自动完成：读最新 `v*` tag → 累加 patch/minor/major → 更新 `package.json` version → commit（`release: vX.Y.Z`）→ 打 tag → 推送（触发 CI）。
 
 `publish-x64` 自动完成：计算本地 x64 产物的 sha512/size → 以 `-x64` 后缀名上传（`dsh-desktop-<版本>-x64.dmg` / `-x64-mac.zip`，electron-updater 靠文件名区分架构）→ 拉取 release 里已有的 `latest-mac.yml`（arm64 条目）→ 合并 x64 条目后覆盖上传。
 
-> `--tag` 必须与 CI 建 release 的 tag 一致。当前产物未签名/未公证（默认不签名策略），用户安装会弹系统警告，适合自测与内部使用；正式分发需配置 Developer ID 证书 + 公证凭据。
+> `--tag` 必须与 CI 建 release 的 tag 一致（即 bump-version 输出的版本）。当前产物未签名/未公证（默认不签名策略），用户安装会弹系统警告，适合自测与内部使用；正式分发需配置 Developer ID 证书 + 公证凭据。
 
 ## 文档
 

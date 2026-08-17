@@ -19,7 +19,8 @@
     "install-engine": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/install-engine.mjs",
     "rebuild-engine": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/rebuild-engine.mjs",
     "smoke": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/smoke.mjs",
-    "publish-x64": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/publish-x64.mjs"
+    "publish-x64": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/publish-x64.mjs",
+    "release": "node scripts/bump-version.mjs"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
