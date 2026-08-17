@@ -66,7 +66,7 @@ git tag v0.1.0 && git push origin v0.1.0
 pnpm build
 
 # 4. 上传 x64 dmg/zip 到该 release 并合并 latest-mac.yml
-pnpm run publish-x64 -- --tag v0.1.0
+pnpm run publish-x64 --tag v0.1.0
 ```
 
 `publish-x64` 自动完成：计算本地 x64 产物的 sha512/size → 以 `-x64` 后缀名上传（`dsh-desktop-<版本>-x64.dmg` / `-x64-mac.zip`，electron-updater 靠文件名区分架构）→ 拉取 release 里已有的 `latest-mac.yml`（arm64 条目）→ 合并 x64 条目后覆盖上传。
