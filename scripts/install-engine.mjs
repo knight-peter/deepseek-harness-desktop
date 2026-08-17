@@ -45,8 +45,17 @@ function pmCommand(pm) {
   return process.platform === 'win32' ? `${pm}.cmd` : pm
 }
 
+/**
+ * spawnSync wrapper: on Windows, executing a `.cmd`/`.bat` shim requires
+ * `shell: true` (Node cannot run them directly); elsewhere plain spawn is
+ * used. Merges extra options, so callers keep their stdio/encoding etc.
+ */
+function pmSpawn(command, args, options = {}) {
+  return spawnSync(command, args, { ...options, shell: process.platform === 'win32' })
+}
+
 function run(command, args, cwd) {
-  const result = spawnSync(command, args, { cwd, stdio: 'inherit' })
+  const result = pmSpawn(command, args, { cwd, stdio: 'inherit' })
   if (result.status !== 0) {
     console.error(`install-engine: ${command} ${args.join(' ')} failed (exit ${String(result.status)})`)
     return false
@@ -55,8 +64,8 @@ function run(command, args, cwd) {
 }
 
 function packageManager() {
-  if (spawnSync(pmCommand('npm'), ['--version'], { stdio: 'ignore' }).status === 0) return 'npm'
-  if (spawnSync(pmCommand('pnpm'), ['--version'], { stdio: 'ignore' }).status === 0) return 'pnpm'
+  if (pmSpawn(pmCommand('npm'), ['--version'], { stdio: 'ignore' }).status === 0) return 'npm'
+  if (pmSpawn(pmCommand('pnpm'), ['--version'], { stdio: 'ignore' }).status === 0) return 'pnpm'
   return null
 }
 
@@ -87,7 +96,7 @@ function installFromCheckout(dir, pm) {
   if (!run(pnpmCmd, ['run', 'build'], checkout)) return false
   const tarballs = []
   for (const pkgDir of ['apps/cli', 'apps/web']) {
-    const pack = spawnSync(pnpmCmd, ['--dir', pkgDir, 'pack', '--pack-destination', dir], { cwd: checkout, encoding: 'utf8' })
+    const pack = pmSpawn(pnpmCmd, ['--dir', pkgDir, 'pack', '--pack-destination', dir], { cwd: checkout, encoding: 'utf8' })
     if (pack.status !== 0) {
       console.error(`install-engine: pnpm pack ${pkgDir} failed (exit ${String(pack.status)})`)
       return false

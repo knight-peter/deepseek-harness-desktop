@@ -36,9 +36,10 @@ if (natives.length === 0) {
 console.log(`rebuild-engine: rebuilding ${natives.length} native module(s):`)
 for (const file of natives) console.log(`  ${file}`)
 // On Windows the .bin shim is a `.cmd` wrapper (no PATHEXT resolution in
-// spawnSync); elsewhere it is a plain executable.
+// spawnSync, and `.cmd` files require shell:true); elsewhere it is a plain
+// executable.
 const bin = join(ROOT, 'node_modules', '.bin', `electron-rebuild${process.platform === 'win32' ? '.cmd' : ''}`)
-const result = spawnSync(bin, ['-m', ENGINE_DIR], { stdio: 'inherit' })
+const result = spawnSync(bin, ['-m', ENGINE_DIR], { stdio: 'inherit', shell: process.platform === 'win32' })
 if (result.status !== 0) {
   console.error(`rebuild-engine: electron-rebuild failed (exit ${String(result.status)})`)
   process.exit(result.status ?? 1)
