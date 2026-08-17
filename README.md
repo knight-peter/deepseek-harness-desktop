@@ -6,7 +6,7 @@ Electron 壳，托管 DeepSeek Harness 的 `dsh web` 引擎。业务功能 100% 
 
 ```sh
 mise install                # 首次：按 mise.toml 装 Node 24 + pnpm 11（可选，已装对应版本可跳过）
-cp .env.example .env.local  # 可选：本机私有凭据（token/证书等）——共享配置在 .env，build/publish 按 .env → .env.development → .env.local 顺序加载（dev 不读）
+cp .env .env.local  # 可选：本机私有凭据——.env 底部有私有项模板（复制到 .env.local 填），共享配置已在 .env，build/publish 按 .env → .env.development → .env.local 顺序加载（dev 不读）
 pnpm install
 pnpm run install-engine   # 首次：把锁定版本引擎装进 resources/engine（registry，7 分钟左右）
 pnpm dev
