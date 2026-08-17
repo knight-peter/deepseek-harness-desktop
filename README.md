@@ -34,7 +34,8 @@ pnpm dev
 ```sh
 pnpm dev              # 编译并启动 Electron 壳
 pnpm compile          # 只编译：tsc 编译 main + 拷贝 preload/renderer 到 dist/
-pnpm build            # 打包出最终产物：compile + electron-builder（三平台，产物在 release/）
+pnpm build            # 打包出最终产物：compile + electron-builder（本机当前架构，Intel Mac → x64）
+pnpm run publish-x64  # 把本机 x64 产物上传到指定 GitHub release 并合并 latest-mac.yml（用法见下文）
 pnpm install-engine   # 安装锁定版本引擎到 resources/engine（registry 主路径，DSH_CHECKOUT 构建兜底）
 pnpm rebuild-engine   # @electron/rebuild：引擎原生模块按 Electron ABI 重编
 pnpm smoke            # 引擎冒烟：Electron-as-Node boot + 健康检查 + 优雅退出
@@ -43,6 +44,34 @@ pnpm lint
 ```
 
 > ⚠️ 打包命令是 **`pnpm build`**（或 `pnpm run build`）。不要用 `pnpm pack`——那是 pnpm 内置命令（等价 `npm pack`，打 tarball），不会执行本项目的打包脚本。
+
+## 发布到 GitHub Releases
+
+mac 双架构策略：**CI（macos-15）出 arm64 包，本机出 x64 包**，两者通过 `scripts/publish-x64.mjs` 合并进同一个 GitHub release（electron-updater 按机器架构自动选包）。
+
+### 前置条件
+
+- `.env.local` 里已填 `GH_TOKEN`（fine-grained，仓库权限 Contents: Read and write）；
+- CI 已为某 tag 创建 release（打 tag 推 GitHub 触发，或已有 release）。
+
+### 流程
+
+```sh
+# 1. 打 tag 并推送（触发 CI 三平台构建 + 自动建 release；已有 release 可跳过）
+git tag v0.1.0 && git push origin v0.1.0
+
+# 2. 等 CI 全绿，确认 GitHub Releases 里已有该 tag 的 release
+
+# 3. 本机打 Intel x64 包（本机 Mac）
+pnpm build
+
+# 4. 上传 x64 dmg/zip 到该 release 并合并 latest-mac.yml
+pnpm run publish-x64 -- --tag v0.1.0
+```
+
+`publish-x64` 自动完成：计算本地 x64 产物的 sha512/size → 以 `-x64` 后缀名上传（`dsh-desktop-<版本>-x64.dmg` / `-x64-mac.zip`，electron-updater 靠文件名区分架构）→ 拉取 release 里已有的 `latest-mac.yml`（arm64 条目）→ 合并 x64 条目后覆盖上传。
+
+> `--tag` 必须与 CI 建 release 的 tag 一致。当前产物未签名/未公证（默认不签名策略），用户安装会弹系统警告，适合自测与内部使用；正式分发需配置 Developer ID 证书 + 公证凭据。
 
 ## 文档
 
