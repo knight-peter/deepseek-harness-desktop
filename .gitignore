@@ -25,3 +25,7 @@ npm-debug.log*
 .DS_Store
 .vscode/
 .idea/
+
+# local env (never commit secrets)
+.env.local
+.env.*.local

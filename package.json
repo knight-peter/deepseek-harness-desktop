@@ -13,12 +13,13 @@
   "scripts": {
     "dev": "pnpm run compile && electron .",
     "compile": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
-    "build": "pnpm run compile && electron-builder",
+    "build": "pnpm run compile && node --env-file-if-exists=.env.local node_modules/electron-builder/out/cli/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
-    "install-engine": "node scripts/install-engine.mjs",
-    "rebuild-engine": "node scripts/rebuild-engine.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "install-engine": "node --env-file-if-exists=.env.local scripts/install-engine.mjs",
+    "rebuild-engine": "node --env-file-if-exists=.env.local scripts/rebuild-engine.mjs",
+    "smoke": "node --env-file-if-exists=.env.local scripts/smoke.mjs",
+    "publish-x64": "node --env-file-if-exists=.env.local scripts/publish-x64.mjs"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",

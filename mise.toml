@@ -1,0 +1,12 @@
+# mise tool versions for dsh-desktop.
+#
+# Node is pinned to 24.x to match Electron 43's embedded Node 24 (the engine
+# runs under ELECTRON_RUN_AS_NODE), satisfy package.json engines
+# `>=22.19.0`, and keep `node --env-file-if-exists` (Node ≥ 22.9) available
+# for the .env.local loading used by build/publish scripts.
+# pnpm is pinned to 11 to match the CI workflow (.github/workflows/build.yml).
+#
+# After editing: `mise install` to fetch these versions, `mise use` to trust.
+[tools]
+node = "24"
+pnpm = "11"
