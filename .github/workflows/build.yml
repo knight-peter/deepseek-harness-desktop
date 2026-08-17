@@ -51,6 +51,12 @@ jobs:
       - name: Package (electron-builder → release/)
         run: pnpm run build
         env:
+          # publish.owner/repo in electron-builder.yml use ${env.GH_OWNER} /
+          # ${env.GH_REPO} macros (defined in .env locally); CI has no .env
+          # file, so provide them here — keep in sync with .env + package.json
+          # `repository`.
+          GH_OWNER: knight-peter
+          GH_REPO: deepseek-harness-desktop
           # macOS signing: Developer ID certificate (base64 p12 + password).
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}

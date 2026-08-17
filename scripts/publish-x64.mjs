@@ -31,8 +31,12 @@ const RELEASE_DIR = join(ROOT, 'release')
 
 const API = 'https://api.github.com'
 const TOKEN = process.env.GH_TOKEN
-const OWNER = process.env.GH_OWNER ?? 'knight-peter'
-const REPO = process.env.GH_REPO ?? 'deepseek-harness-desktop'
+const OWNER = process.env.GH_OWNER
+const REPO = process.env.GH_REPO
+
+if (OWNER === undefined || OWNER === '' || REPO === undefined || REPO === '') {
+  fail('GH_OWNER / GH_REPO must be set (defined in .env; loaded via --env-file-if-exists)')
+}
 
 function fail(message) {
   console.error(`publish-x64: ${message}`)

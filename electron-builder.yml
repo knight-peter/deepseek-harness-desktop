@@ -7,14 +7,15 @@
 appId: ai.deepseek.dshdesktop
 productName: dsh-desktop
 # electron-updater release source. GitHub Releases is the default provider;
-# owner/repo must match the GitHub repository (update package.json's
-# `repository` field in lockstep). Publishing happens when CI runs with
-# GH_TOKEN and a git tag/draft release is present (electron-builder's
-# default `onTagOrDraft`); plain `pnpm build` never publishes.
+# owner/repo come from .env (GH_OWNER/GH_REPO) via electron-builder's
+# ${env.X} macro — keep them in sync with package.json's `repository` field.
+# Publishing happens when CI runs with GH_TOKEN and a git tag/draft release
+# is present (electron-builder's default `onTagOrDraft`); plain `pnpm build`
+# never publishes.
 publish:
   provider: github
-  owner: knight-peter
-  repo: deepseek-harness-desktop
+  owner: ${env.GH_OWNER}
+  repo: ${env.GH_REPO}
 directories:
   output: release
 files:
