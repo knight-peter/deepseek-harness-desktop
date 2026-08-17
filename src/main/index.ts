@@ -10,8 +10,9 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { delimiter, join } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell, type MenuItemConstructorOptions } from 'electron'
 import { Harness, nodeSatisfiesEngine } from './harness.js'
+import { allowClipboardPermissions, ClipboardWatcher, pasteTextToFocusedWindow } from './clipboard.js'
 import type { Settings } from './config.js'
 import { SettingsStore } from './config.js'
 import { PluginManager } from './plugins.js'
@@ -29,6 +30,12 @@ let lastDump = ''
 let quitting = false
 
 const settings = new SettingsStore(app.getPath('userData'))
+
+// Clipboard change watcher: broadcasts plain-text clipboard changes to every
+// window (see preload's `onClipboardChange`). Started once the app is ready.
+const clipboardWatcher = new ClipboardWatcher({
+  onTextChange: (text) => broadcast('clipboard:change', text),
+})
 
 function dshHome(): string {
   return process.env.DSH_HOME ?? join(app.getPath('home'), '.dsh')
@@ -153,6 +160,17 @@ function createWindow(): void {
   })
 }
 
+/**
+ * Read the system clipboard in the main process and insert it into the
+ * focused editable element of the focused window. Works even if the web
+ * page's own paste handling is broken or blocked.
+ */
+async function pasteClipboardIntoFocused(): Promise<void> {
+  const text = clipboard.readText()
+  if (text === '') return
+  pasteTextToFocusedWindow(() => BrowserWindow.getFocusedWindow(), text)
+}
+
 function createManagerWindow(): void {
   if (managerWindow !== null) {
     managerWindow.focus()
@@ -244,6 +262,26 @@ function installMenu(): void {
       ],
     },
     {
+      label: '编辑',
+      submenu: [
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪切' },
+        { role: 'copy', label: '复制' },
+        { role: 'paste', label: '粘贴' },
+        { role: 'pasteAndMatchStyle', label: '粘贴并匹配样式' },
+        { role: 'delete', label: '删除' },
+        { type: 'separator' },
+        { role: 'selectAll', label: '全选' },
+        { type: 'separator' },
+        // Fallback that never relies on the page's own paste handling: read
+        // the system clipboard in the main process and insert it into the
+        // focused editable element of the focused window.
+        { label: '粘贴剪切板内容到输入框', click: () => { void pasteClipboardIntoFocused() } },
+      ],
+    },
+    {
       label: '窗口',
       submenu: [
         { label: '管理窗口（插件 / 调试 / 设置）', accelerator: 'CmdOrCtrl+,', click: () => createManagerWindow() },
@@ -263,6 +301,10 @@ function installMenu(): void {
 async function boot(): Promise<void> {
   createWindow()
   installMenu()
+  // Clipboard: let the engine UI (an http://127.0.0.1 page) use the async
+  // Clipboard API, and start watching for system clipboard changes.
+  allowClipboardPermissions(session.defaultSession)
+  clipboardWatcher.start()
   const version = process.versions.node
   if (!nodeSatisfiesEngine(version)) {
     const message = `Electron 内嵌 Node ${version} 不满足引擎要求 ^22.19.0 || >=24.0.0；请升级到 Electron ≥ 40。`
@@ -281,6 +323,7 @@ app.on('before-quit', (event) => {
   if (quitting) return
   event.preventDefault()
   quitting = true
+  clipboardWatcher.stop()
   void harness.stop().finally(() => app.quit())
 })
 process.on('SIGINT', () => app.quit())
@@ -293,6 +336,11 @@ ipcMain.handle('harness:get-logs', () => harness.recentLogs)
 ipcMain.handle('harness:restart', () => restartEngine())
 ipcMain.handle('app:quit', () => app.quit())
 ipcMain.handle('app:open-manager', () => createManagerWindow())
+
+// Clipboard: current text + insert-into-focused-fallback (the menu item and
+// the renderer both route through these).
+ipcMain.handle('clipboard:read-text', () => clipboard.readText())
+ipcMain.handle('clipboard:paste-focused', () => pasteClipboardIntoFocused())
 
 ipcMain.handle('plugins:list', () => pluginManager().list())
 ipcMain.handle('plugins:scaffold', async (_event, name: string) => {

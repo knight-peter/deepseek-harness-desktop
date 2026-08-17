@@ -40,6 +40,12 @@ contextBridge.exposeInMainWorld('dshDesktop', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   setSettings: (patch) => ipcRenderer.invoke('settings:set', patch),
 
+  // clipboard (system clipboard bridge; `clipboard:change` fires whenever
+  // the plain-text clipboard content changes anywhere on the system)
+  readClipboardText: () => ipcRenderer.invoke('clipboard:read-text'),
+  pasteClipboardIntoFocused: () => ipcRenderer.invoke('clipboard:paste-focused'),
+  onClipboardChange: (callback) => on('clipboard:change', callback),
+
   // updater (Phase 5)
   engineVersion: () => ipcRenderer.invoke('updater:engine-version'),
   backupHome: () => ipcRenderer.invoke('updater:backup'),
