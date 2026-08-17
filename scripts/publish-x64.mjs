@@ -1,0 +1,246 @@
+/**
+ * Publish the locally-built macOS artifacts of one architecture into the
+ * GitHub release that CI created for the other architecture, and merge the
+ * entries into latest-mac.yml so electron-updater can serve both.
+ *
+ * Background (see docs/开发总结.md §4.6): the CI mac runner (macos-15) is
+ * arm64 and ships the Apple Silicon package; there is no Intel macOS runner
+ * on GitHub anymore (macos-13 retired), so the x64 package is built locally
+ * (`pnpm build` on an Intel Mac) and merged here. electron-updater matches
+ * files by the architecture string in the file name, so artifacts must be
+ * uploaded under arch-suffixed names (`dsh-desktop-<v>-x64.dmg` / `-arm64`).
+ *
+ * Usage:
+ *   GH_TOKEN=<token> node scripts/publish-x64.mjs --tag v0.1.0
+ *   GH_TOKEN=<token> node scripts/publish-x64.mjs --tag v0.1.0 --arch arm64
+ *
+ * The local artifacts are read from `release/` (as produced by `pnpm build`,
+ * which names single-arch output without a suffix) and uploaded under the
+ * arch-suffixed name. Requires a GitHub token with `repo` scope; the target
+ * release must already exist (created by CI's publish step).
+ * @module dsh-desktop/publish-x64
+ */
+
+import { createHash } from 'node:crypto'
+import { readFileSync, statSync } from 'node:fs'
+import { extname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
+const RELEASE_DIR = join(ROOT, 'release')
+
+const API = 'https://api.github.com'
+const TOKEN = process.env.GH_TOKEN
+const OWNER = process.env.GH_OWNER ?? 'knight-peter'
+const REPO = process.env.GH_REPO ?? 'deepseek-harness-desktop'
+
+function fail(message) {
+  console.error(`publish-x64: ${message}`)
+  process.exit(1)
+}
+
+function parseArgs(argv) {
+  const args = { tag: null, arch: 'x64' }
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--tag') args.tag = argv[++i] ?? null
+    else if (argv[i] === '--arch') args.arch = argv[++i] ?? 'x64'
+  }
+  if (args.tag === null) fail('missing --tag <vX.Y.Z>')
+  if (args.arch !== 'x64' && args.arch !== 'arm64') fail(`unsupported --arch ${args.arch} (x64|arm64)`)
+  return args
+}
+
+async function gh(path, options = {}) {
+  const headers = {
+    Authorization: `Bearer ${TOKEN}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    ...(options.headers ?? {}),
+  }
+  const response = await fetch(`${API}${path}`, { ...options, headers })
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw new Error(`GitHub API ${response.status} on ${path}: ${body.slice(0, 300)}`)
+  }
+  return response.status === 204 ? null : response.json()
+}
+
+/** sha512 (base64) + byte size of a local file. */
+function artifactInfo(filePath) {
+  const data = readFileSync(filePath)
+  return { sha512: createHash('sha512').update(data).digest('base64'), size: data.length }
+}
+
+/** Resolve the release by tag; returns id + upload_url without the template suffix. */
+async function getRelease(tag) {
+  const release = await gh(`/repos/${OWNER}/${REPO}/releases/tags/${encodeURIComponent(tag)}`)
+  return { id: release.id, uploadUrl: release.upload_url.replace(/\{[^}]*\}$/, '') }
+}
+
+/** Upload a binary asset; GitHub 422s on a name collision, which we treat as already-present. */
+async function uploadAsset(uploadUrl, assetName, data) {
+  const response = await fetch(`${uploadUrl}?name=${encodeURIComponent(assetName)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/octet-stream' },
+    body: data,
+  })
+  if (response.ok) {
+    console.log(`publish-x64: uploaded ${assetName}`)
+    return
+  }
+  if (response.status === 422) {
+    console.log(`publish-x64: asset ${assetName} already exists — skipping`)
+    return
+  }
+  const body = await response.text().catch(() => '')
+  throw new Error(`upload ${assetName} failed: ${response.status} ${body.slice(0, 300)}`)
+}
+
+/** Replace a metadata file (latest-mac.yml): delete the old asset, then upload. */
+async function replaceAsset(releaseId, uploadUrl, assetName, data) {
+  const assets = await gh(`/repos/${OWNER}/${REPO}/releases/${releaseId}/assets`)
+  for (const asset of assets) {
+    if (asset.name === assetName) {
+      await gh(`/repos/${OWNER}/${REPO}/releases/assets/${asset.id}`, { method: 'DELETE' })
+      console.log(`publish-x64: deleted old ${assetName}`)
+    }
+  }
+  await uploadAsset(uploadUrl, assetName, data)
+}
+
+/** Parse the subset of latest-mac.yml we care about (files + top-level fields). */
+function parseUpdateInfo(text) {
+  const info = { files: [] }
+  let inFiles = false
+  let current = null
+  const flush = () => {
+    if (current !== null) info.files.push(current)
+    current = null
+  }
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (line === 'files:') {
+      flush()
+      inFiles = true
+      continue
+    }
+    if (inFiles) {
+      if (line.startsWith('- url:')) {
+        flush()
+        current = { url: line.slice(6).trim() }
+      } else if (current !== null && line.startsWith('sha512:')) {
+        current.sha512 = line.slice(7).trim()
+      } else if (current !== null && line.startsWith('size:')) {
+        current.size = Number(line.slice(5).trim())
+      } else if (!line.startsWith('- ')) {
+        flush()
+        inFiles = false
+      }
+      if (inFiles) continue
+    }
+    if (line.startsWith('version:')) info.version = line.slice(8).trim()
+    else if (line.startsWith('path:')) info.path = line.slice(5).trim()
+    else if (line.startsWith('sha512:')) info.sha512 = line.slice(7).trim()
+    else if (line.startsWith('releaseDate:')) info.releaseDate = line.slice(12).trim()
+  }
+  flush()
+  return info
+}
+
+/** Minimal YAML emitter for the merged update info (kept dependency-free). */
+function serializeUpdateInfo(info) {
+  const lines = []
+  if (info.version !== undefined) lines.push(`version: ${info.version}`)
+  lines.push('files:')
+  for (const f of info.files) {
+    lines.push(`  - url: ${f.url}`)
+    lines.push(`    sha512: ${f.sha512}`)
+    lines.push(`    size: ${f.size}`)
+  }
+  if (info.path !== undefined) lines.push(`path: ${info.path}`)
+  if (info.sha512 !== undefined) lines.push(`sha512: ${info.sha512}`)
+  if (info.releaseDate !== undefined) lines.push(`releaseDate: ${info.releaseDate}`)
+  return `${lines.join('\n')}\n`
+}
+
+/** Collect the arch's local artifacts from release/ and compute hashes. */
+function loadLocalArtifacts(arch) {
+  const version = (() => {
+    try {
+      return JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version
+    } catch {
+      return null
+    }
+  })()
+  if (version === null) fail('cannot read package.json version')
+
+  const artifacts = []
+  for (const ext of ['.zip', '.dmg']) {
+    const plain = join(RELEASE_DIR, `dsh-desktop-${version}${ext}`)
+    if (exists(plain)) {
+      artifacts.push({
+        localPath: plain,
+        remoteName: `dsh-desktop-${version}-${arch}${ext}`,
+        info: artifactInfo(plain),
+      })
+    }
+  }
+  if (artifacts.length === 0) fail(`no artifacts in ${RELEASE_DIR} matching dsh-desktop-${version}.{zip,dmg} — run pnpm build first`)
+  return { version, artifacts }
+}
+
+/** Append the arch's files to the update info; keep the first zip as the top-level path. */
+function mergeUpdateInfo(existing, newFiles) {
+  if (existing === null) {
+    const first = newFiles[0]
+    return { version: undefined, files: newFiles, path: first.url, sha512: first.sha512, releaseDate: new Date().toISOString() }
+  }
+  for (const file of newFiles) {
+    if (!existing.files.some((f) => f.url === file.url)) existing.files.push(file)
+  }
+  return existing
+}
+
+async function downloadUpdateInfo(releaseId) {
+  const assets = await gh(`/repos/${OWNER}/${REPO}/releases/${releaseId}/assets`)
+  const asset = assets.find((a) => a.name === 'latest-mac.yml')
+  if (asset === undefined) return null
+  const response = await fetch(asset.browser_download_url, { headers: { Authorization: `Bearer ${TOKEN}` } })
+  if (!response.ok) throw new Error(`download latest-mac.yml failed: ${response.status}`)
+  return parseUpdateInfo(await response.text())
+}
+
+function exists(path) {
+  try {
+    statSync(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function main() {
+  const { tag, arch } = parseArgs(process.argv.slice(2))
+  if (TOKEN === undefined || TOKEN === '') fail('GH_TOKEN env var is required')
+
+  const release = await getRelease(tag).catch((error) => fail(`release ${tag} not found: ${error.message}`))
+  console.log(`publish-x64: release ${tag} (id ${release.id})`)
+
+  const { version, artifacts } = loadLocalArtifacts(arch)
+  console.log(`publish-x64: local ${arch} artifacts (version ${version}):`)
+  for (const a of artifacts) console.log(`  ${a.localPath} -> ${a.remoteName} (${a.info.size} bytes)`)
+
+  for (const artifact of artifacts) {
+    await uploadAsset(release.uploadUrl, artifact.remoteName, readFileSync(artifact.localPath))
+  }
+
+  const existing = await downloadUpdateInfo(release.id)
+  const merged = mergeUpdateInfo(existing, artifacts.map((a) => ({ url: a.remoteName, sha512: a.info.sha512, size: a.info.size })))
+  const ymlText = serializeUpdateInfo(merged)
+  await replaceAsset(release.id, release.uploadUrl, 'latest-mac.yml', Buffer.from(ymlText, 'utf8'))
+  console.log('publish-x64: latest-mac.yml updated:')
+  console.log(ymlText)
+  console.log('publish-x64: done')
+}
+
+void main()

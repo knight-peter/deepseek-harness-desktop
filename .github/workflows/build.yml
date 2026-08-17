@@ -10,7 +10,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        # macos-15 is the Apple Silicon (arm64) runner — the only mac build
+        # CI ships (Intel x64 packages are built locally and merged into the
+        # release by scripts/publish-x64.mjs; see docs/开发总结.md §4.6).
+        # Pin the concrete label instead of macos-latest so a future label
+        # change cannot silently switch the runner arch.
+        os: [macos-15, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
