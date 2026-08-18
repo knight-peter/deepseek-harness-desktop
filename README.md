@@ -51,21 +51,22 @@ pnpm lint
 
 mac 双架构策略：**CI（macos-15）出 arm64 包，本机出 x64 包**，两者通过 `scripts/publish-x64.mjs` 合并进同一个 GitHub release（electron-updater 按机器架构自动选包）。
 
-**CI 只在打 `v*` tag 时触发**（workflow `on.push.tags`）；普通 push 不跑 CI。发布流程：打 tag → CI 三平台打包并建 release（同时自动同步 GitCode 镜像）→ 本机 Intel x64 补发 → 手动触发镜像补全。
+**CI 只在打 `v*` tag 时触发**（workflow `on.push.tags`）；普通 push 不跑 CI。发布流程：打 tag → CI 三平台打包并建 release → 本机 Intel x64 补发 → 本机同步 GitCode 镜像（x64）。
 
 **应用内更新双源**：GitHub Releases（默认）+ GitCode 国内镜像（`releases/download/latest`，国内直连快）。应用默认「自动」：先探测 GitCode，不可达则用 GitHub；管理窗口「设置与更新」可固定更新源并测速。
+
+> ⚠️ 镜像现状：本机同步只覆盖 **x64 mac**（本机是 Intel）。arm64/win/linux 用户走 GitCode 源时无匹配架构 → 应用内自动降级 GitHub（已实现，功能可用但慢）。完整镜像（arm64/win/linux）需手动下载产物后 `--dir` 一键上传（见下）——因为国内网络拉 GitHub 大文件不可行，且 GitHub CI（美国 runner）上传 GitCode OBS 也不通（均已实测）。
 
 ### 前置条件
 
 - `.env.local` 里已填 `GH_TOKEN`（fine-grained，仓库权限 Contents: Read and write）；
 - `.env.local` 里已填 `GITCODE_TOKEN`（GitCode 访问令牌，scope `api`，建议设过期时间）；
-- **GitHub Secrets 里配置 `GITCODE_TOKEN`**（仓库 Settings → Secrets → Actions）——CI 的自动镜像同步需要它；
 - 工作区干净（bump-version 会拒绝 dirty 状态）。
 
 ### 流程（一条命令自动累加版本号）
 
 ```sh
-# 1. 自动累加版本 + commit + tag + push（触发 CI 三平台构建 + 自动建 release + 自动同步 GitCode 镜像）
+# 1. 自动累加版本 + commit + tag + push（触发 CI 三平台构建 + 自动建 release）
 pnpm run release                    # v0.1.0 → v0.1.1（默认 patch）
 pnpm run release --minor            # → v0.2.0（可选）
 pnpm run release --major            # → v1.0.0（可选）
@@ -77,8 +78,14 @@ pnpm run release --version 0.3.0    # 显式指定（可选）
 pnpm build
 pnpm run publish-x64               # 自动用最新 tag
 
-# 4. 把 x64 补进 GitCode 镜像（CI 自动同步时 x64 还不存在）
-#    GitHub → Actions → sync-domestic → Run workflow（可留空 tag，自动用最新）
+# 4. 同步 GitCode 镜像（本机 x64 直传，全自动）
+pnpm run sync-domestic              # 默认取最新 v* tag + 本机架构
+```
+
+**完整镜像（可选，arm64/win/linux）**：手动从 GitHub release 页（或用 GitHub 加速站）下载 6 个产物文件（arm64/x64 dmg+zip、win exe、linux AppImage + 3 个 latest-*.yml）放进一个目录，然后：
+
+```sh
+pnpm run sync-domestic --dir ./mirror --tag v0.1.1   # 目录里已下载的产物一键上传 + 校验
 ```
 
 > pnpm 会把脚本名后的参数原样转发，**不需要 `--` 分隔**（那是 npm 的写法；pnpm 会把 `--` 也原样转发进 argv，bump-version 两种都能识别，但统一用不带 `--` 的写法）。
@@ -87,7 +94,7 @@ pnpm run publish-x64               # 自动用最新 tag
 
 `publish-x64` 自动完成：计算本地 x64 产物的 sha512/size → 以 `-x64` 后缀名上传（`dsh-desktop-<版本>-x64.dmg` / `-x64-mac.zip`，electron-updater 靠文件名区分架构）→ 拉取 release 里已有的 `latest-mac.yml`（arm64 条目）→ 合并 x64 条目后覆盖上传 → **校验 release 多平台完整性**（mac x64+arm64 / windows / linux / 更新元数据，缺失会警告）→ **release 为 draft 时自动发布为公开**（`--keep-draft` 可跳过）。上传走 HTTP/1.1，避免大文件 HTTP/2 中断。
 
-`sync-domestic`（`pnpm run sync-domestic`）自动完成：默认读本地 `release/` 传本机架构到 GitCode `latest` release；`--from-github` 从 GitHub release 拉全平台产物（arm64/win/linux）补齐镜像。**日常不用本机跑**——CI 发版自动同步 + publish-x64 后手动触发 `sync-domestic` workflow 即可；本机跑用于应急（注意：国内网络拉 GitHub 大文件不可行，`--from-github` 需在 GitHub CI 或代理环境下）。
+`sync-domestic`（`pnpm run sync-domestic`）自动完成：默认读本地 `release/` 传本机架构到 GitCode `latest` release（删旧 → 上传 → 匿名下载校验，幂等）；`--dir <path>` 上传目录里已下载的产物（原文件名，用于完整镜像）；`--from-github` 从 GitHub release 拉全平台（需 GitHub 可达网络，如代理——国内直连不可行）。
 
 > `--tag` 缺省时自动取最新 `v*` tag（与 release 刚生成的版本一致）；显式传 `--tag` 可覆盖。当前产物未签名/未公证（默认不签名策略），用户安装会弹系统警告，适合自测与内部使用；正式分发需配置 Developer ID 证书 + 公证凭据。
 
