@@ -36,7 +36,8 @@ pnpm dev              # 编译并启动 Electron 壳
 pnpm compile          # 只编译：tsc 编译 main + 拷贝 preload/renderer 到 dist/
 pnpm build            # 打包出最终产物：compile + electron-builder（本机当前架构，Intel Mac → x64）
 pnpm run publish-x64  # 把本机 x64 产物上传到指定 GitHub release 并合并 latest-mac.yml（用法见下文）
-pnpm run sync-domestic  # 同步产物到 GitCode 国内更新镜像（用法见下文；日常由 CI 自动执行）
+pnpm run sync-domestic  # 同步产物到 GitCode 国内更新镜像（用法见下文）
+pnpm run download-release  # 用 gh CLI 下载 GitHub release 产物到 release/mirror（完整镜像前置步骤）
 pnpm run release      # 自动累加版本号 + commit + tag + push，触发发布流程（用法见下文）
 pnpm install-engine   # 安装锁定版本引擎到 resources/engine（registry 主路径，DSH_CHECKOUT 构建兜底）
 pnpm rebuild-engine   # @electron/rebuild：引擎原生模块按 Electron ABI 重编
@@ -82,11 +83,14 @@ pnpm run publish-x64               # 自动用最新 tag
 pnpm run sync-domestic              # 默认取最新 v* tag + 本机架构
 ```
 
-**完整镜像（可选，arm64/win/linux）**：手动从 GitHub release 页（或用 GitHub 加速站）下载 6 个产物文件（arm64/x64 dmg+zip、win exe、linux AppImage + 3 个 latest-*.yml）放进一个目录，然后：
+**完整镜像（可选，arm64/win/linux）**：用 `gh` CLI 下载 GitHub release 产物（需先 `brew install gh` + `gh auth login`），然后一键上传：
 
 ```sh
-pnpm run sync-domestic --dir ./mirror --tag v0.1.1   # 目录里已下载的产物一键上传 + 校验
+pnpm run download-release --tag v0.1.1          # 下载到 release/mirror/（自动过滤 blockmap）
+pnpm run sync-domestic --dir release/mirror --tag v0.1.1   # 目录里的产物一键上传 + 校验
 ```
+
+> 网络恰好通畅时也可直接 `pnpm run sync-domestic --from-github --tag v0.1.1`（脚本自动下载+上传）。
 
 > pnpm 会把脚本名后的参数原样转发，**不需要 `--` 分隔**（那是 npm 的写法；pnpm 会把 `--` 也原样转发进 argv，bump-version 两种都能识别，但统一用不带 `--` 的写法）。
 
