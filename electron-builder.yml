@@ -30,16 +30,33 @@ extraResources:
     to: engine
   - from: resources/engine/node_modules
     to: engine/node_modules
+  # Windows-only hosting constraint (see resources/windows-hide.cjs): shipped
+  # outside the asar with a real file path so the engine process can load it
+  # via `--require` under ELECTRON_RUN_AS_NODE.
+  - from: resources/windows-hide.cjs
+    to: windows-hide.cjs
 npmRebuild: false
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.icns
+  # Ad-hoc signing (`identity: "-"`, electron-builder 26 native support):
+  # without a Developer ID certificate the app would be completely unsigned,
+  # and Gatekeeper then reports a dead-end "app is damaged" dialog on
+  # downloaded copies. An ad-hoc signature downgrades that to the standard
+  # "unidentified developer" flow (right-click → Open to allow), which is the
+  # best free option until a Developer ID cert is configured.
+  #
+  # hardenedRuntime stays on (below); the default entitlements template ships
+  # com.apple.security.cs.disable-library-validation (+ allow-jit), so the
+  # ad-hoc build launches fine despite library validation.
+  #
+  # Switching to real signing later: REMOVE this line once CSC_LINK /
+  # CSC_KEY_PASSWORD are configured (CI secrets or .env.local) — a hardcoded
+  # "-" would otherwise win over the real certificate.
+  identity: "-"
   # Notarization requires the hardened runtime; it is on by default for
   # non-MAS builds, but we pin it explicitly so the intent is visible.
   hardenedRuntime: true
-  # Signing: leave `identity` unset — electron-builder searches the keychain
-  # for a certificate and skips signing (with a warning) when none is found.
-  # CI provides the cert via CSC_LINK / CSC_KEY_PASSWORD / CSC_NAME secrets.
   #
   # Notarization is opt-in per build via env vars (electron-builder 26 uses
   # `notarytool`; one of these credential sets activates it, otherwise the

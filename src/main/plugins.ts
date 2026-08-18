@@ -30,6 +30,8 @@ export interface PluginManagerOptions {
   dshBin: string
   /** Node executable used to run the dsh CLI (Electron binary as node in release). */
   nodeCommand: string
+  /** Extra Node CLI args before the script (e.g. `--require` preload). */
+  nodeArgs?: string[]
   /** Extra environment, e.g. PATH with pnpm; `ELECTRON_RUN_AS_NODE` included by caller. */
   env: Record<string, string>
   /** `$DSH_HOME/plugins-local`: local plugin sources (`scaffold` writes here). */
@@ -58,10 +60,11 @@ export class PluginManager {
     if (this.options.dshBin === '') {
       return { ok: false, exitCode: null, output: '未找到 dsh 引擎：无法执行插件管理命令（请先配置引擎来源）' }
     }
-    const result = spawnSync(this.options.nodeCommand, ['--expose-internals', this.options.dshBin, 'plugin', '--profile', 'web', ...args], {
+    const result = spawnSync(this.options.nodeCommand, ['--expose-internals', ...(this.options.nodeArgs ?? []), this.options.dshBin, 'plugin', '--profile', 'web', ...args], {
       env: this.options.env,
       encoding: 'utf8',
       timeout: 300_000,
+      windowsHide: true,
     })
     const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
     return { ok: result.status === 0, exitCode: result.status, output }

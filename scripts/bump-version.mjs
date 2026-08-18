@@ -15,7 +15,8 @@
  *   - Writes package.json `version`, git-commits it as
  *     `release: v<next>`, creates tag `v<next>` and pushes both.
  *   - The tag push triggers the CI build+release (see workflow `on.push.tags`).
- *   - After CI finishes, run `pnpm run publish-x64 --tag v<next>` locally.
+ *   - After CI finishes, run `pnpm run publish-x64` locally (version is
+ *     read from package.json automatically).
  *
  * Safe-guards: refuses to run with uncommitted changes; refuses to overwrite
  * an existing tag; requires git remote `origin`.
@@ -121,7 +122,7 @@ async function main() {
   console.log(`bump-version: committed + pushed v${next.join('.')}`)
   console.log(`bump-version: CI is building & will create the release.`)
   console.log(`bump-version: when CI is green, run:`)
-  console.log(`  pnpm run publish-x64 --tag v${next.join('.')}`)
+  console.log(`  pnpm run publish-x64`)
 }
 
 void main()

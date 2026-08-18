@@ -13,17 +13,20 @@
  * AppImage/latest-*.yml) — blockmaps are skipped.
  *
  * Usage (pnpm forwards args directly, no `--` needed):
- *   pnpm run download-release                    # auto tag (latest v* git tag)
- *   pnpm run download-release --tag v0.1.1       # explicit version
- *   pnpm run download-release --tag v0.1.1 --dir /some/dir
+ *   pnpm run download-release                    # auto version (package.json)
+ *   pnpm run download-release --dir /some/dir
  *
+ * Version source: the version is read from package.json's `version` field
+ * (the single source of truth after `pnpm run release` — the `v<version>`
+ * git tag matches it). No version argument is needed in the normal flow;
+ * `--tag <vX.Y.Z>` only exists as an override for exceptional cases.
  * Requires: gh CLI installed and authenticated (`brew install gh` + `gh auth
  * login`).
  * @module dsh-desktop/download-release
  */
 
 import { execSync } from 'node:child_process'
-import { mkdirSync, readdirSync, statSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -44,13 +47,11 @@ function parseArgs(argv) {
   return args
 }
 
-/** Latest `v*` git tag (local+remote), or null when none exists. */
-function latestTag() {
+/** Release tag for the current version: `v` + package.json `version`. */
+function packageTag() {
   try {
-    const tags = execSync('git tag --list "v*" --sort=-v:refname', { cwd: ROOT, encoding: 'utf8' })
-      .split('\n')
-      .filter(Boolean)
-    return tags[0] ?? null
+    const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version
+    return typeof version === 'string' && version !== '' ? `v${version}` : null
   } catch {
     return null
   }
@@ -74,8 +75,8 @@ async function main() {
     fail('gh 未登录 —— 先运行 gh auth login')
   }
 
-  const tag = tagArg ?? latestTag()
-  if (tag === null) fail('no --tag given and no v* git tag found; pass --tag <vX.Y.Z>')
+  const tag = tagArg ?? packageTag()
+  if (tag === null) fail('cannot read version from package.json; pass --tag <vX.Y.Z> to override')
 
   mkdirSync(dir, { recursive: true })
   const patterns = ['*.dmg', '*.zip', '*.exe', '*.AppImage', 'latest-*.yml']
@@ -94,7 +95,7 @@ async function main() {
   })
   console.log('download-release: downloaded:')
   for (const file of files) console.log(`  ${file}`)
-  console.log(`download-release: 下一步：pnpm run sync-domestic --dir ${dir} --tag ${tag}`)
+  console.log(`download-release: 下一步：pnpm run sync-domestic --dir ${dir}`)
 }
 
 void main().catch((error) => {

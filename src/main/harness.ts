@@ -42,6 +42,8 @@ export interface HarnessEvents {
 export interface StartOptions {
   /** Absolute path to the dsh CLI entry (`lib/bin.js`). */
   dshBin: string
+  /** Extra Node CLI args for the engine process, before the script (e.g. `--require` preload). */
+  nodeArgs?: string[]
   /** Working directory for the engine process (default: user home). */
   cwd?: string
   /** Extra environment variables, merged over the current environment. */
@@ -105,10 +107,13 @@ export class Harness {
     // (node-addon-require-builtin) silently fails, so bare plugin specifiers
     // would not resolve; `--expose-internals` makes the loader use its plain
     // require fallback instead (verified on Electron 43 / embedded Node 24).
-    const child = spawn(process.execPath, ['--expose-internals', options.dshBin, '--profile', 'web', '--port', '0'], {
+    const child = spawn(process.execPath, ['--expose-internals', ...(options.nodeArgs ?? []), options.dshBin, '--profile', 'web', '--port', '0'], {
       cwd: options.cwd ?? homedir(),
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...options.env },
       stdio: ['ignore', 'pipe', 'pipe'],
+      // electron.exe is a GUI-subsystem binary (no console window either
+      // way), but keep the flag for consistency with every other spawn.
+      windowsHide: true,
     })
     this.child = child
     child.stdout.setEncoding('utf8')

@@ -49,9 +49,11 @@ function pmCommand(pm) {
  * spawnSync wrapper: on Windows, executing a `.cmd`/`.bat` shim requires
  * `shell: true` (Node cannot run them directly); elsewhere plain spawn is
  * used. Merges extra options, so callers keep their stdio/encoding etc.
+ * `windowsHide: true` keeps the console window hidden when this runs from a
+ * console-less GUI parent (packaged app), matching background execution.
  */
 function pmSpawn(command, args, options = {}) {
-  return spawnSync(command, args, { ...options, shell: process.platform === 'win32' })
+  return spawnSync(command, args, { ...options, shell: process.platform === 'win32', windowsHide: true })
 }
 
 function run(command, args, cwd) {

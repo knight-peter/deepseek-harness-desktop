@@ -13,6 +13,8 @@ import { join } from 'node:path'
 export interface ToolsOptions {
   dshBin: string
   nodeCommand: string
+  /** Extra Node CLI args before the script (e.g. `--require` preload). */
+  nodeArgs?: string[]
   env: Record<string, string>
   profileDir: string
   dshHome: string
@@ -36,10 +38,11 @@ export class Tools {
 
   /** `dsh --profile web --dump-config`: the composed tree, no server booted. */
   dumpConfig(): { ok: boolean; output: string } {
-    const result = spawnSync(this.options.nodeCommand, ['--expose-internals', this.options.dshBin, '--profile', 'web', '--dump-config'], {
+    const result = spawnSync(this.options.nodeCommand, ['--expose-internals', ...(this.options.nodeArgs ?? []), this.options.dshBin, '--profile', 'web', '--dump-config'], {
       env: this.options.env,
       encoding: 'utf8',
       timeout: 60_000,
+      windowsHide: true,
     })
     const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
     return { ok: result.status === 0, output }

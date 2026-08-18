@@ -25,7 +25,7 @@ jobs:
       matrix:
         # macos-15 is the Apple Silicon (arm64) runner — the only mac build
         # CI ships (Intel x64 packages are built locally and merged into the
-        # release by scripts/publish-x64.mjs; see docs/开发总结.md §4.6).
+        # release by scripts/publish-x64.mjs; see docs/开发总结.md §4.1).
         # Pin the concrete label instead of macos-latest so a future label
         # change cannot silently switch the runner arch.
         os: [macos-15, windows-latest, ubuntu-latest]

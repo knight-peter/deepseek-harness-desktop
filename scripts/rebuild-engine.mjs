@@ -39,7 +39,7 @@ for (const file of natives) console.log(`  ${file}`)
 // spawnSync, and `.cmd` files require shell:true); elsewhere it is a plain
 // executable.
 const bin = join(ROOT, 'node_modules', '.bin', `electron-rebuild${process.platform === 'win32' ? '.cmd' : ''}`)
-const result = spawnSync(bin, ['-m', ENGINE_DIR], { stdio: 'inherit', shell: process.platform === 'win32' })
+const result = spawnSync(bin, ['-m', ENGINE_DIR], { stdio: 'inherit', shell: process.platform === 'win32', windowsHide: true })
 if (result.status !== 0) {
   console.error(`rebuild-engine: electron-rebuild failed (exit ${String(result.status)})`)
   process.exit(result.status ?? 1)

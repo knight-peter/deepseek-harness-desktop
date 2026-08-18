@@ -3,7 +3,7 @@
  * GitHub release that CI created for the other architecture, and merge the
  * entries into latest-mac.yml so electron-updater can serve both.
  *
- * Background (see docs/开发总结.md §4.6): the CI mac runner (macos-15) is
+ * Background (see docs/开发总结.md §4.1/§4.4): the CI mac runner (macos-15) is
  * arm64 and ships the Apple Silicon package; there is no Intel macOS runner
  * on GitHub anymore (macos-13 retired), so the x64 package is built locally
  * (`pnpm build` on an Intel Mac) and merged here. electron-updater matches
@@ -11,8 +11,13 @@
  * uploaded under arch-suffixed names (`dsh-desktop-<v>-x64.dmg` / `-arm64`).
  *
  * Usage:
- *   GH_TOKEN=<token> node scripts/publish-x64.mjs --tag v0.1.0
- *   GH_TOKEN=<token> node scripts/publish-x64.mjs --tag v0.1.0 --arch arm64
+ *   GH_TOKEN=<token> node scripts/publish-x64.mjs
+ *   GH_TOKEN=<token> node scripts/publish-x64.mjs --arch arm64
+ *
+ * Version source: the version is read from package.json's `version` field
+ * (the single source of truth after `pnpm run release` — the `v<version>`
+ * git tag matches it). No version argument is needed in the normal flow;
+ * `--tag <vX.Y.Z>` only exists as an override for exceptional cases.
  *
  * The local artifacts are read from `release/` (as produced by `pnpm build`,
  * which names single-arch output without a suffix) and uploaded under the
@@ -22,7 +27,6 @@
  */
 
 import { createHash } from 'node:crypto'
-import { execSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { extname, join, resolve } from 'node:path'
 import { request as httpsRequest } from 'node:https'
@@ -55,13 +59,11 @@ function parseArgs(argv) {
   return args
 }
 
-/** Latest `v*` git tag (local+remote), or null when none exists. */
-function latestTag() {
+/** Release tag for the current version: `v` + package.json `version`. */
+function packageTag() {
   try {
-    const tags = execSync('git tag --list "v*" --sort=-v:refname', { cwd: ROOT, encoding: 'utf8' })
-      .split('\n')
-      .filter(Boolean)
-    return tags[0] ?? null
+    const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version
+    return typeof version === 'string' && version !== '' ? `v${version}` : null
   } catch {
     return null
   }
@@ -346,11 +348,11 @@ async function main() {
   const { tag: tagArg, arch } = parseArgs(process.argv.slice(2))
   if (TOKEN === undefined || TOKEN === '') fail('GH_TOKEN env var is required')
 
-  // Tag resolution: explicit --tag wins; otherwise auto-detect the latest
-  // `v*` tag (so a plain `pnpm run publish-x64` right after `pnpm run release`
-  // targets the version that CI just built).
-  const tag = tagArg ?? latestTag()
-  if (tag === null) fail('no --tag given and no v* git tag found; pass --tag <vX.Y.Z>')
+  // Tag resolution: explicit --tag wins; otherwise use the package.json
+  // version (after `pnpm run release` it always matches the release CI just
+  // built, so a plain `pnpm run publish-x64` needs no arguments).
+  const tag = tagArg ?? packageTag()
+  if (tag === null) fail('cannot read version from package.json; pass --tag <vX.Y.Z> to override')
 
   const release = await getRelease(tag).catch((error) => fail(`release ${tag} not found: ${error.message}`))
   console.log(`publish-x64: release ${tag} (id ${release.id})`)

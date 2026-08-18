@@ -64,6 +64,30 @@ function engineNodeEnv(): Record<string, string> {
 }
 
 /**
+ * Absolute path to the win32 windows-hide preload (`resources/windows-hide.cjs`),
+ * or '' when absent. Shipped outside the asar via extraResources so the engine
+ * process can load it with a real file path under `ELECTRON_RUN_AS_NODE`.
+ */
+function windowsHidePreload(): string {
+  const path = app.isPackaged
+    ? join(process.resourcesPath, 'windows-hide.cjs')
+    : join(app.getAppPath(), 'resources', 'windows-hide.cjs')
+  return existsSync(path) ? path : ''
+}
+
+/**
+ * Extra Node CLI args for engine CLI processes: `--require` the win32
+ * preload that forces `windowsHide: true` on the engine's own spawns
+ * (mechanism B). Windows-only — other platforms inherit a console and never
+ * create visible windows; empty when the preload file is missing.
+ */
+function engineNodeArgs(): string[] {
+  if (process.platform !== 'win32') return []
+  const preload = windowsHidePreload()
+  return preload === '' ? [] : ['--require', preload]
+}
+
+/**
  * Resolve the dsh CLI entry, in priority order: explicit `DSH_ENGINE_BIN`
  * override, the packaged engine under `resources/engine`, a `DSH_CHECKOUT`
  * dev checkout's built CLI, then the persisted dev-mode checkout path from
@@ -130,7 +154,7 @@ async function startEngine(): Promise<void> {
     return
   }
   try {
-    await harness.start({ dshBin, env: engineNodeEnv() })
+    await harness.start({ dshBin, env: engineNodeEnv(), nodeArgs: engineNodeArgs() })
   } catch (error) {
     // The harness already pushed an error state; add a friendly diagnosis
     // parsed from the engine's recent stderr.
@@ -237,6 +261,7 @@ function pluginManager(): PluginManager {
     profileDir: profileDir(),
     dshBin: resolveDshBin(),
     nodeCommand: process.execPath,
+    nodeArgs: engineNodeArgs(),
     env: cliCommandEnv(),
     pluginsLocalDir: join(dshHome(), 'plugins-local'),
   })
@@ -246,6 +271,7 @@ function tools(): Tools {
   return new Tools({
     dshBin: resolveDshBin(),
     nodeCommand: process.execPath,
+    nodeArgs: engineNodeArgs(),
     env: engineNodeEnv(),
     profileDir: profileDir(),
     dshHome: dshHome(),
@@ -512,6 +538,7 @@ ipcMain.handle('updater:apply', async () => {
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
       encoding: 'utf8',
       timeout: 600_000,
+      windowsHide: true,
     })
     output += `${result.stdout ?? ''}${result.stderr ?? ''}`
     if (result.status !== 0) {

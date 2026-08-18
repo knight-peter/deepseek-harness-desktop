@@ -23,11 +23,15 @@
  * `.../releases/download/latest/` forever while only the attachments change.
  *
  * Usage (pnpm forwards args directly, no `--` needed):
- *   pnpm run sync-domestic                          # local mode, auto tag+arch
- *   pnpm run sync-domestic --tag v0.1.1 --arch arm64
- *   pnpm run sync-domestic --from-github --tag v0.1.1   # full mirror from GitHub
- *   pnpm run sync-domestic --dir ./mirror --tag v0.1.1  # upload pre-downloaded files
+ *   pnpm run sync-domestic                          # local mode, auto version+arch
+ *   pnpm run sync-domestic --arch arm64
+ *   pnpm run sync-domestic --from-github            # full mirror from GitHub
+ *   pnpm run sync-domestic --dir ./mirror           # upload pre-downloaded files
  *
+ * Version source: the version is read from package.json's `version` field
+ * (the single source of truth after `pnpm run release` — the `v<version>`
+ * git tag matches it). No version argument is needed in the normal flow;
+ * `--tag <vX.Y.Z>` only exists as an override for exceptional cases.
  * Requires:
  *   - GITCODE_TOKEN (add to .env.local), GITCODE_OWNER / GITCODE_REPO (in .env)
  *   - --from-github additionally: GH_TOKEN (.env.local), GH_OWNER / GH_REPO (.env)
@@ -36,7 +40,6 @@
  */
 
 import { createHash } from 'node:crypto'
-import { execSync } from 'node:child_process'
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { request as httpsRequest } from 'node:https'
@@ -78,13 +81,11 @@ function parseArgs(argv) {
   return args
 }
 
-/** Latest `v*` git tag (local+remote), or null when none exists. */
-function latestTag() {
+/** Release tag for the current version: `v` + package.json `version`. */
+function packageTag() {
   try {
-    const tags = execSync('git tag --list "v*" --sort=-v:refname', { cwd: ROOT, encoding: 'utf8' })
-      .split('\n')
-      .filter(Boolean)
-    return tags[0] ?? null
+    const version = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version
+    return typeof version === 'string' && version !== '' ? `v${version}` : null
   } catch {
     return null
   }
@@ -425,8 +426,8 @@ async function main() {
     fail('--from-github requires GH_TOKEN (.env.local) and GH_OWNER/GH_REPO (.env)')
   }
 
-  const tag = tagArg ?? latestTag()
-  if (tag === null) fail('no --tag given and no v* git tag found; pass --tag <vX.Y.Z>')
+  const tag = tagArg ?? packageTag()
+  if (tag === null) fail('cannot read version from package.json; pass --tag <vX.Y.Z> to override')
   const version = tag.replace(/^v/, '')
 
   let artifacts
