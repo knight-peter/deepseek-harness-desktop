@@ -2,13 +2,19 @@
  * Sync release artifacts plus update metadata into the GitCode `latest`
  * release — the domestic update mirror (see docs/plans/国内发布与多更新源方案.md).
  *
- * Two data sources, one target:
+ * Three data sources, one target:
  *   - default (local mode): the LOCAL release/ directory (single-arch
  *     electron-builder output, same as publish-x64.mjs) — syncs only the host
  *     mac architecture;
  *   - `--from-github`: the GitHub release for `--tag` (the single source of
  *     truth after CI + publish-x64 merged x64) — syncs the FULL multi-platform
  *     set (mac arm64+x64, windows, linux) and the three latest-*.yml files.
+ *     NOTE: downloads from GitHub, so it needs GitHub-reachable network (a
+ *     proxy or a GitHub-accelerated download worked around by --dir);
+ *   - `--dir <path>`: upload whatever release artifacts are already present
+ *     in a local directory (e.g. manually downloaded from the GitHub release
+ *     page or a GitHub mirror), uploaded under their file names — the
+ *     "download manually, upload automatically" path for the full mirror.
  *
  * Background (P1 verified): GitCode attachments upload via OBS presigned PUT
  * and download anonymously over a CDN; the download URL
@@ -20,6 +26,7 @@
  *   pnpm run sync-domestic                          # local mode, auto tag+arch
  *   pnpm run sync-domestic --tag v0.1.1 --arch arm64
  *   pnpm run sync-domestic --from-github --tag v0.1.1   # full mirror from GitHub
+ *   pnpm run sync-domestic --dir ./mirror --tag v0.1.1  # upload pre-downloaded files
  *
  * Requires:
  *   - GITCODE_TOKEN (add to .env.local), GITCODE_OWNER / GITCODE_REPO (in .env)
@@ -30,7 +37,7 @@
 
 import { createHash } from 'node:crypto'
 import { execSync } from 'node:child_process'
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { request as httpsRequest } from 'node:https'
 import { fileURLToPath } from 'node:url'
@@ -60,11 +67,12 @@ function fail(message) {
 }
 
 function parseArgs(argv) {
-  const args = { tag: null, arch: process.arch === 'arm64' ? 'arm64' : 'x64', fromGithub: false }
+  const args = { tag: null, arch: process.arch === 'arm64' ? 'arm64' : 'x64', fromGithub: false, dir: null }
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--tag') args.tag = argv[++i] ?? null
     else if (argv[i] === '--arch') args.arch = argv[++i] ?? args.arch
     else if (argv[i] === '--from-github') args.fromGithub = true
+    else if (argv[i] === '--dir') args.dir = argv[++i] ?? null
   }
   if (args.arch !== 'x64' && args.arch !== 'arm64') fail(`unsupported --arch ${args.arch} (x64|arm64)`)
   return args
@@ -276,6 +284,25 @@ function verifyArtifactShas(artifacts, ymls) {
 
 // ── local mode helpers ──────────────────────────────────────────────────────
 
+/** Collect release artifacts already present in a directory (manual download
+ * from the GitHub release page or a mirror), uploaded under their own names. */
+function loadDirArtifacts(dir) {
+  const keep = (name) => /\.(dmg|zip|exe|AppImage)$/.test(name) || /^latest(-mac|-linux)?\.yml$/.test(name)
+  const artifacts = []
+  const ymls = new Map()
+  for (const name of readdirSync(dir)) {
+    if (!keep(name)) continue
+    const data = readFileSync(join(dir, name))
+    if (/^latest.*\.yml$/.test(name)) {
+      ymls.set(name, data.toString('utf8'))
+    } else {
+      artifacts.push({ localPath: join(dir, name), remoteName: name, info: { sha512: sha512Of(data), size: data.length } })
+    }
+  }
+  if (artifacts.length === 0) fail(`no syncable artifacts in ${dir} (expected *.dmg/*.zip/*.exe/*.AppImage + latest-*.yml)`)
+  return { artifacts, ymls }
+}
+
 /** Collect the arch's local mac artifacts and rename them with the arch
  * suffix electron-updater matches on (`-<arch>.dmg` / `-<arch>-mac.zip`). */
 function loadLocalArtifacts(arch) {
@@ -392,7 +419,7 @@ async function verifySync(expectedFiles, ymls) {
 }
 
 async function main() {
-  const { tag: tagArg, arch, fromGithub } = parseArgs(process.argv.slice(2))
+  const { tag: tagArg, arch, fromGithub, dir } = parseArgs(process.argv.slice(2))
   if (TOKEN === undefined || TOKEN === '') fail('GITCODE_TOKEN env var is required (add to .env.local)')
   if (fromGithub && (GH_TOKEN === undefined || GH_TOKEN === '' || GH_OWNER === undefined || GH_REPO === undefined)) {
     fail('--from-github requires GH_TOKEN (.env.local) and GH_OWNER/GH_REPO (.env)')
@@ -404,19 +431,29 @@ async function main() {
 
   let artifacts
   let ymls
-  if (fromGithub) {
+  let mode
+  if (dir !== null) {
+    console.log(`sync-domestic: loading pre-downloaded artifacts from ${dir}`)
+    const loaded = loadDirArtifacts(dir)
+    artifacts = loaded.artifacts
+    ymls = loaded.ymls
+    verifyArtifactShas(artifacts, ymls)
+    mode = 'dir'
+  } else if (fromGithub) {
     console.log(`sync-domestic: pulling ${tag} from GitHub (${GH_OWNER}/${GH_REPO})`)
     const loaded = await loadGithubArtifacts(tag)
     artifacts = loaded.artifacts
     ymls = loaded.ymls
     verifyArtifactShas(artifacts, ymls)
+    mode = 'github'
   } else {
     const local = loadLocalArtifacts(arch)
     artifacts = local.artifacts
     ymls = new Map([['latest-mac.yml', rewriteUpdateInfo(local.version, arch)]])
+    mode = `local ${arch}`
   }
 
-  console.log(`sync-domestic: syncing v${version} → ${OWNER}/${REPO} release "${TAG}" (${fromGithub ? 'github' : `local ${arch}`})`)
+  console.log(`sync-domestic: syncing v${version} → ${OWNER}/${REPO} release "${TAG}" (${mode})`)
   for (const a of artifacts) {
     console.log(`  ${a.localPath} -> ${a.remoteName} (${a.info.size} bytes)`)
   }
