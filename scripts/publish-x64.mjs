@@ -25,6 +25,7 @@ import { createHash } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { extname, join, resolve } from 'node:path'
+import { request as httpsRequest } from 'node:https'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -87,9 +88,18 @@ function artifactInfo(filePath) {
   return { sha512: createHash('sha512').update(data).digest('base64'), size: data.length }
 }
 
-/** Resolve the release by tag; returns id + upload_url without the template suffix. */
+/**
+ * Resolve the release by tag; returns id + upload_url without the template
+ * suffix. GitHub's `/releases/tags/<tag>` endpoint 404s for DRAFT releases
+ * (a known API limitation), so fall back to listing `/releases` and matching
+ * by tag_name — drafts are included there.
+ */
 async function getRelease(tag) {
-  const release = await gh(`/repos/${OWNER}/${REPO}/releases/tags/${encodeURIComponent(tag)}`)
+  const byTag = await gh(`/repos/${OWNER}/${REPO}/releases/tags/${encodeURIComponent(tag)}`).catch(() => null)
+  const release = byTag ?? (await gh(`/repos/${OWNER}/${REPO}/releases?per_page=100`)).find((r) => r.tag_name === tag)
+  if (release === undefined || release === null) {
+    throw new Error(`release ${tag} not found`)
+  }
   return { id: release.id, uploadUrl: release.upload_url.replace(/\{[^}]*\}$/, '') }
 }
 
@@ -133,25 +143,69 @@ async function verifyRelease(releaseId, tag, version) {
   } else {
     console.log(`publish-x64: ✅ release ${tag} is complete (mac x64+arm64 / windows / linux / update metadata)`)
   }
+  return missing
 }
 
-/** Upload a binary asset; GitHub 422s on a name collision, which we treat as already-present. */
-async function uploadAsset(uploadUrl, assetName, data) {
-  const response = await fetch(`${uploadUrl}?name=${encodeURIComponent(assetName)}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/octet-stream' },
-    body: data,
+/**
+ * Upload a binary asset to GitHub's uploads endpoint over HTTP/1.1 with
+ * retry. Node's fetch (undici) negotiates HTTP/2, which GitHub's upload
+ * endpoint aborts mid-transfer for large files (ERR_HTTP2_STREAM_ERROR);
+ * HTTP/1.1 uploads large assets reliably. 422 = name collision (already
+ * uploaded) → treated as success/skip.
+ */
+function uploadHttp1(uploadUrl, assetName, data) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(uploadUrl)
+    url.searchParams.set('name', assetName)
+    const req = httpsRequest(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': data.length,
+        },
+      },
+      (res) => {
+        const chunks = []
+        res.on('data', (chunk) => chunks.push(chunk))
+        res.on('end', () => {
+          const body = Buffer.concat(chunks).toString('utf8')
+          if (res.statusCode === 201 || res.statusCode === 200) {
+            resolve({ ok: true, status: res.statusCode, body })
+          } else if (res.statusCode === 422) {
+            resolve({ ok: false, status: 422, body })
+          } else {
+            resolve({ ok: false, status: res.statusCode ?? 0, body })
+          }
+        })
+      },
+    )
+    req.on('error', reject)
+    req.end(data)
   })
-  if (response.ok) {
-    console.log(`publish-x64: uploaded ${assetName}`)
-    return
+}
+
+async function uploadAsset(uploadUrl, assetName, data) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const result = await uploadHttp1(uploadUrl, assetName, data)
+      if (result.ok) {
+        console.log(`publish-x64: uploaded ${assetName}`)
+        return
+      }
+      if (result.status === 422) {
+        console.log(`publish-x64: asset ${assetName} already exists — skipping`)
+        return
+      }
+      throw new Error(`upload ${assetName} failed: ${result.status} ${result.body.slice(0, 300)}`)
+    } catch (error) {
+      if (attempt === 3) throw error
+      console.warn(`publish-x64: upload ${assetName} attempt ${attempt} failed (${String(error.message ?? error).slice(0, 120)}), retrying…`)
+      await new Promise((resolve) => setTimeout(resolve, 2000 * attempt))
+    }
   }
-  if (response.status === 422) {
-    console.log(`publish-x64: asset ${assetName} already exists — skipping`)
-    return
-  }
-  const body = await response.text().catch(() => '')
-  throw new Error(`upload ${assetName} failed: ${response.status} ${body.slice(0, 300)}`)
 }
 
 /** Replace a metadata file (latest-mac.yml): delete the old asset, then upload. */
@@ -233,12 +287,19 @@ function loadLocalArtifacts(arch) {
   if (version === null) fail('cannot read package.json version')
 
   const artifacts = []
-  for (const ext of ['.zip', '.dmg']) {
-    const plain = join(RELEASE_DIR, `dsh-desktop-${version}${ext}`)
+  // Local single-arch electron-builder output: dmg is `dsh-desktop-<v>.dmg`,
+  // mac zip is `dsh-desktop-<v>-mac.zip` (platform suffix). Upload both under
+  // the arch-suffixed names (`-<arch>.dmg` / `-<arch>-mac.zip`).
+  const candidates = [
+    { local: `dsh-desktop-${version}.dmg`, remote: `dsh-desktop-${version}-${arch}.dmg` },
+    { local: `dsh-desktop-${version}-mac.zip`, remote: `dsh-desktop-${version}-${arch}-mac.zip` },
+  ]
+  for (const { local, remote } of candidates) {
+    const plain = join(RELEASE_DIR, local)
     if (exists(plain)) {
       artifacts.push({
         localPath: plain,
-        remoteName: `dsh-desktop-${version}-${arch}${ext}`,
+        remoteName: remote,
         info: artifactInfo(plain),
       })
     }
@@ -263,7 +324,11 @@ async function downloadUpdateInfo(releaseId) {
   const assets = await gh(`/repos/${OWNER}/${REPO}/releases/${releaseId}/assets`)
   const asset = assets.find((a) => a.name === 'latest-mac.yml')
   if (asset === undefined) return null
-  const response = await fetch(asset.browser_download_url, { headers: { Authorization: `Bearer ${TOKEN}` } })
+  // Use the assets API (not browser_download_url): the latter 404s for
+  // DRAFT release assets (same draft limitation as /releases/tags).
+  const response = await fetch(`${API}/repos/${OWNER}/${REPO}/releases/assets/${asset.id}`, {
+    headers: { Authorization: `Bearer ${TOKEN}`, Accept: 'application/octet-stream' },
+  })
   if (!response.ok) throw new Error(`download latest-mac.yml failed: ${response.status}`)
   return parseUpdateInfo(await response.text())
 }
@@ -306,7 +371,34 @@ async function main() {
   console.log(ymlText)
 
   await verifyRelease(release.id, tag, version)
+
+  // Auto-publish: CI creates the release as a draft; once x64 is merged and
+  // the release is complete, flip it to a public release so users can
+  // download it. `--keep-draft` opts out.
+  if (!process.argv.includes('--keep-draft')) {
+    const releaseDetail = await gh(`/repos/${OWNER}/${REPO}/releases/${release.id}`)
+    if (releaseDetail.draft) {
+      await gh(`/repos/${OWNER}/${REPO}/releases/${release.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ draft: false }),
+      })
+      console.log(`publish-x64: ✅ published draft release ${tag} (now public)`)
+    } else {
+      console.log(`publish-x64: release ${tag} is already public (not a draft)`)
+    }
+  } else {
+    console.log(`publish-x64: --keep-draft — leaving release ${tag} as draft`)
+  }
+
   console.log('publish-x64: done')
 }
 
-void main()
+void main().catch((error) => {
+  console.error(`publish-x64: ${String(error.message ?? error)}`)
+  process.exit(1)
+})
+// Explicit exit: some sockets (the draft-check request) may still be open
+// when main resolves; letting the process drain them can surface a spurious
+// EPIPE after all work is done.
+process.on('exit', () => process.exit(0))
