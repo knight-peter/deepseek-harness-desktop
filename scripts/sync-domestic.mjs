@@ -100,7 +100,7 @@ function sha512Of(data) {
 
 async function gitcodeApi(path, options = {}) {
   const headers = { 'private-token': TOKEN, Accept: 'application/json', ...(options.headers ?? {}) }
-  const response = await fetch(`${API_GITCODE}${path}`, { ...options, headers })
+  const response = await fetch(`${API_GITCODE}${path}`, { ...options, headers, signal: AbortSignal.timeout(30_000) })
   if (!response.ok) {
     const body = await response.text().catch(() => '')
     throw new Error(`GitCode API ${response.status} on ${path}: ${body.slice(0, 300)}`)
@@ -126,7 +126,8 @@ async function getUploadUrl(fileName) {
 }
 
 /** PUT a buffer to the OBS presigned URL over HTTP/1.1 (the URL carries the
- * signature + x-obs-* headers from upload_url; expires in ~1h). */
+ * signature + x-obs-* headers from upload_url; expires in ~1h). A per-request
+ * timeout keeps a hung connection (e.g. runner → OBS) from stalling forever. */
 function obsPut(url, headers, data) {
   return new Promise((resolvePromise, reject) => {
     const req = httpsRequest(
@@ -141,6 +142,9 @@ function obsPut(url, headers, data) {
         })
       },
     )
+    req.setTimeout(180_000, () => {
+      req.destroy(new Error(`upload timeout after 180s (${url.slice(0, 120)})`))
+    })
     req.on('error', reject)
     req.end(data)
   })
@@ -174,6 +178,7 @@ async function githubApi(path) {
       'User-Agent': 'dsh-desktop-sync',
       'X-GitHub-Api-Version': '2022-11-28',
     },
+    signal: AbortSignal.timeout(30_000),
   })
   if (!response.ok) {
     const body = await response.text().catch(() => '')
