@@ -1,0 +1,88 @@
+diff --git a/dist/cjs/util.js b/dist/cjs/util.js
+index 77e64b56872bc65bcb0f60ecfbec84eb3da02c6f..9b9228f0f52700e7df90c99deac8376a14833a40 100644
+--- a/dist/cjs/util.js
++++ b/dist/cjs/util.js
+@@ -151,7 +151,12 @@ async function walkAsync(dirPath) {
+     (0, exports.debugLog)('Walking... ' + dirPath);
+     async function _walkAsync(dirPath) {
+         const children = await fs.readdir(dirPath);
+-        return await Promise.all(children.map(async (child) => {
++        // Serialized walk (upstream PR #286): the previous Promise.all
++        // implementation opened every file in the bundle concurrently via
++        // isBinaryFile, exhausting the process fd limit on trees with tens of
++        // thousands of files (EMFILE: too many open files during signing).
++        const results = [];
++        for (const child of children) {
+             const filePath = path.resolve(dirPath, child);
+             const stat = await fs.stat(filePath);
+             if (stat.isFile()) {
+@@ -159,9 +164,9 @@ async function walkAsync(dirPath) {
+                     case '.cstemp': // Temporary file generated from past codesign
+                         (0, exports.debugLog)('Removing... ' + filePath);
+                         await fs.remove(filePath);
+-                        return null;
++                        break;
+                     default:
+-                        return await getFilePathIfBinary(filePath);
++                        results.push(await getFilePathIfBinary(filePath));
+                 }
+             }
+             else if (stat.isDirectory() && !stat.isSymbolicLink()) {
+@@ -171,10 +176,10 @@ async function walkAsync(dirPath) {
+                     case '.framework': // Framework
+                         walkResult.push(filePath);
+                 }
+-                return walkResult;
++                results.push(...walkResult);
+             }
+-            return null;
+-        }));
++        }
++        return results;
+     }
+     const allPaths = await _walkAsync(dirPath);
+     return compactFlattenedList(allPaths);
+diff --git a/dist/esm/util.js b/dist/esm/util.js
+index d3f66d54b1a88e7410d78affe17de87302db02a3..ac35a6c4768bc1366d91700784b70ba5ffab345f 100644
+--- a/dist/esm/util.js
++++ b/dist/esm/util.js
+@@ -115,7 +115,12 @@ export async function walkAsync(dirPath) {
+     debugLog('Walking... ' + dirPath);
+     async function _walkAsync(dirPath) {
+         const children = await fs.readdir(dirPath);
+-        return await Promise.all(children.map(async (child) => {
++        // Serialized walk (upstream PR #286): the previous Promise.all
++        // implementation opened every file in the bundle concurrently via
++        // isBinaryFile, exhausting the process fd limit on trees with tens of
++        // thousands of files (EMFILE: too many open files during signing).
++        const results = [];
++        for (const child of children) {
+             const filePath = path.resolve(dirPath, child);
+             const stat = await fs.stat(filePath);
+             if (stat.isFile()) {
+@@ -123,9 +128,9 @@ export async function walkAsync(dirPath) {
+                     case '.cstemp': // Temporary file generated from past codesign
+                         debugLog('Removing... ' + filePath);
+                         await fs.remove(filePath);
+-                        return null;
++                        break;
+                     default:
+-                        return await getFilePathIfBinary(filePath);
++                        results.push(await getFilePathIfBinary(filePath));
+                 }
+             }
+             else if (stat.isDirectory() && !stat.isSymbolicLink()) {
+@@ -135,10 +140,10 @@ export async function walkAsync(dirPath) {
+                     case '.framework': // Framework
+                         walkResult.push(filePath);
+                 }
+-                return walkResult;
++                results.push(...walkResult);
+             }
+-            return null;
+-        }));
++        }
++        return results;
+     }
+     const allPaths = await _walkAsync(dirPath);
+     return compactFlattenedList(allPaths);

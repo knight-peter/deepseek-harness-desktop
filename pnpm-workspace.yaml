@@ -7,3 +7,5 @@ allowBuilds:
   electron-winstaller: false
 minimumReleaseAgeExclude:
   - pnpm@11.22.0
+patchedDependencies:
+  '@electron/osx-sign@1.3.3': patches/@electron__osx-sign@1.3.3.patch
