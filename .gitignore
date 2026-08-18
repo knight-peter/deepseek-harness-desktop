@@ -29,3 +29,6 @@ npm-debug.log*
 # local env (never commit secrets)
 .env.local
 .env.*.local
+
+# planning docs (draft, not versioned)
+docs/plans/

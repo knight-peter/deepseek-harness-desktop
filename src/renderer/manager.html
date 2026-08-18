@@ -108,6 +108,17 @@
     <div class="row">
       <label><input type="checkbox" id="auto-update-check" /> 启动时自动检查应用更新（仅发布版）</label>
     </div>
+    <h2>应用更新源</h2>
+    <div class="row">
+      <select id="update-source">
+        <option value="auto">自动（GitCode 优先，失败切 GitHub）</option>
+        <option value="gitcode">固定 GitCode 镜像（国内）</option>
+        <option value="github">固定 GitHub（默认源）</option>
+      </select>
+      <button id="probe-source-btn">测速</button>
+      <span id="probe-result" class="muted"></span>
+    </div>
+    <p class="muted">GitCode 为国内更新镜像（`releases/download/latest`，由 sync-domestic 维护）；GitHub 为默认源。自动模式下启动检查先探测 GitCode，不可达则用 GitHub；手动固定则始终走指定源。</p>
     <p class="muted">开发模式下引擎来源优先级：DSH_ENGINE_BIN 环境变量 → resources/engine 打包引擎 → DSH_CHECKOUT 环境变量 → 上方保存的 checkout 路径。</p>
     <h2>引擎版本与更新</h2>
     <div class="row">

@@ -153,12 +153,15 @@ const checkoutInput = document.getElementById('checkout-path')
 const inspectEnabled = document.getElementById('inspect-enabled')
 const inspectPort = document.getElementById('inspect-port')
 const autoUpdateCheck = document.getElementById('auto-update-check')
+const updateSourceSelect = document.getElementById('update-source')
+const probeResult = document.getElementById('probe-result')
 
 void api.getSettings().then((settings) => {
   checkoutInput.value = settings.checkoutPath ?? ''
   inspectEnabled.checked = settings.inspectPort !== undefined
   inspectPort.value = String(settings.inspectPort ?? 9229)
   autoUpdateCheck.checked = settings.autoCheckUpdates === true
+  updateSourceSelect.value = settings.updateSource ?? 'auto'
 })
 
 document.getElementById('checkout-save').addEventListener('click', async () => {
@@ -169,6 +172,15 @@ document.getElementById('checkout-save').addEventListener('click', async () => {
 inspectEnabled.addEventListener('change', () => api.setSettings({ inspectPort: inspectEnabled.checked ? Number(inspectPort.value) : undefined }))
 inspectPort.addEventListener('change', () => api.setSettings({ inspectPort: Number(inspectPort.value) }))
 autoUpdateCheck.addEventListener('change', () => api.setSettings({ autoCheckUpdates: autoUpdateCheck.checked }))
+updateSourceSelect.addEventListener('change', () => api.setSettings({ updateSource: updateSourceSelect.value }))
+
+document.getElementById('probe-source-btn').addEventListener('click', async () => {
+  probeResult.textContent = '测速中…'
+  const results = await api.probeUpdateSources()
+  probeResult.textContent = results
+    .map((s) => `${s.name}: ${s.reachable ? `${s.latencyMs}ms` : '不可达'}`)
+    .join('　|　')
+})
 
 // ── updater ─────────────────────────────────────────────────────────────────
 const engineVersionEl = document.getElementById('engine-version')

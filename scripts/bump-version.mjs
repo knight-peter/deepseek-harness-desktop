@@ -6,6 +6,8 @@
  *   node scripts/bump-version.mjs --minor    # v0.1.0 → v0.2.0
  *   node scripts/bump-version.mjs --major    # v0.1.0 → v1.0.0
  *   node scripts/bump-version.mjs --version 0.3.0   # explicit
+ *   pnpm run release --minor                 # same, via pnpm (pnpm forwards
+ *                                            # args directly, no `--` needed)
  *
  * Behaviour:
  *   - Reads the latest `v*` git tag (or package.json version if no tag yet).

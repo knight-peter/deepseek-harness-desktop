@@ -102,3 +102,34 @@ jobs:
           name: dsh-desktop-${{ matrix.os }}
           path: release/*
           if-no-files-found: error
+
+  # After the three-platform build created the GitHub release, mirror it to
+  # the GitCode `latest` release (domestic update feed). Runs inside GitHub's
+  # network, so downloading our own release assets is fast — a domestic
+  # machine cannot pull them (see docs/plans/国内发布与多更新源方案.md §8.1).
+  # NOTE: at this point the release has no x64 mac artifacts yet (those are
+  # merged later by the local publish-x64 step); run the sync-domestic
+  # workflow again after publish-x64 to add them.
+  sync:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # sync-domestic is dependency-free (node built-ins + fetch); no install.
+      - name: Sync release to GitCode mirror
+        run: pnpm run sync-domestic --from-github --tag ${{ github.ref_name }}
+        env:
+          # GITHUB_TOKEN can read the draft release's assets; GITCODE_TOKEN
+          # must be configured in the repository secrets (scope: api).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}

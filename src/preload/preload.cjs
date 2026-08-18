@@ -50,4 +50,5 @@ contextBridge.exposeInMainWorld('dshDesktop', {
   engineVersion: () => ipcRenderer.invoke('updater:engine-version'),
   backupHome: () => ipcRenderer.invoke('updater:backup'),
   applyUpdate: () => ipcRenderer.invoke('updater:apply'),
+  probeUpdateSources: () => ipcRenderer.invoke('updater:probe-sources'),
 })

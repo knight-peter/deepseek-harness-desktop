@@ -1,0 +1,50 @@
+name: sync-domestic
+
+# Manually mirror a GitHub release to the GitCode `latest` release (domestic
+# update feed). Primary use: after the local publish-x64 step merged the
+# Intel x64 artifacts into the release, re-run this to add them to the mirror
+# (the automatic sync in build.yml runs before publish-x64, so it has no x64).
+# Also usable any time to (re)sync a release.
+#
+# Requires the GITCODE_TOKEN secret (scope: api) in repository settings.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'GitHub release tag to mirror (default: latest v* git tag)'
+        required: false
+        type: string
+
+concurrency:
+  group: sync-domestic
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # fetch all tags so sync-domestic can auto-detect the latest v* tag.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Sync release to GitCode mirror
+        run: |
+          if [ -n "$TAG" ]; then
+            pnpm run sync-domestic --from-github --tag "$TAG"
+          else
+            pnpm run sync-domestic --from-github
+          fi
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}

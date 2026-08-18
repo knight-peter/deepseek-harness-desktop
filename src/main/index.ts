@@ -13,11 +13,12 @@ import { delimiter, join } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell, type MenuItemConstructorOptions } from 'electron'
 import { Harness, nodeSatisfiesEngine } from './harness.js'
 import { allowClipboardPermissions, ClipboardWatcher, pasteTextToFocusedWindow } from './clipboard.js'
-import type { Settings } from './config.js'
+import type { Settings, UpdateSourceChoice } from './config.js'
 import { SettingsStore } from './config.js'
 import { PluginManager } from './plugins.js'
 import { diagnoseStartupFailure, Tools } from './tools.js'
 import { backupDshHome, installedEngineVersion, latestEngineVersion } from './updater.js'
+import { probeAllSources, resolveSource, sourceById } from './updateSources.js'
 
 // electron-updater is CommonJS; named ESM imports fail at load time.
 const require = createRequire(import.meta.url)
@@ -28,6 +29,8 @@ let managerWindow: BrowserWindow | null = null
 let engineUiLoaded = false
 let lastDump = ''
 let quitting = false
+/** True while a check was triggered from the menu (needs a visible result). */
+let manualUpdateCheck = false
 
 const settings = new SettingsStore(app.getPath('userData'))
 
@@ -256,7 +259,10 @@ function installMenu(): void {
       submenu: [
         { label: '关于 dsh-desktop', click: () => void dialog.showMessageBox({ message: `dsh-desktop\n引擎运行时：Electron 内嵌 Node ${process.versions.node}` }) },
         { type: 'separator' },
-        { label: '检查应用更新…', visible: app.isPackaged, click: () => { void autoUpdater.checkForUpdates() } },
+        { label: '检查应用更新…', visible: app.isPackaged, click: () => {
+          manualUpdateCheck = true
+          void checkUpdatesWithFallback()
+        } },
         { type: 'separator' },
         { label: '退出', accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
       ],
@@ -298,9 +304,119 @@ function installMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+/**
+ * Wire electron-updater events into visible user experience. Called once at
+ * boot; the listeners stay for the app's lifetime.
+ *
+ * UX rules:
+ *  - startup check is silent (no dialog when a new version exists, only logs);
+ *  - a downloaded update prompts the user with "restart now / later" —
+ *    autoInstallOnAppQuit still covers the "quit later" path;
+ *  - errors are logged only (an update failure must never block the app).
+ */
+function setupAutoUpdater(): void {
+  if (!app.isPackaged) return // updates only exist in packaged builds
+
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on('checking-for-update', () => {
+    console.log('[updater] checking for updates')
+  })
+
+  autoUpdater.on('update-available', (info) => {
+    console.log(`[updater] update available: ${info.version}`)
+    // Manual check → visible confirmation; startup check stays silent.
+    if (manualUpdateCheck) {
+      manualUpdateCheck = false
+      const win = BrowserWindow.getFocusedWindow() ?? mainWindow
+      if (win !== null && !win.isDestroyed()) {
+        void dialog.showMessageBox(win, {
+          type: 'info',
+          title: 'dsh-desktop 更新',
+          message: `发现新版本 v${info.version}`,
+          detail: '正在后台下载，下载完成后会提示重启应用。',
+          buttons: ['知道了'],
+        })
+      }
+    }
+  })
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('[updater] no update available')
+    if (manualUpdateCheck) {
+      manualUpdateCheck = false
+      const win = BrowserWindow.getFocusedWindow() ?? mainWindow
+      if (win !== null && !win.isDestroyed()) {
+        void dialog.showMessageBox(win, {
+          type: 'info',
+          title: 'dsh-desktop 更新',
+          message: '已是最新版本',
+          buttons: ['知道了'],
+        })
+      }
+    }
+  })
+
+  autoUpdater.on('error', (error) => {
+    console.error('[updater] error:', error)
+  })
+
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log(`[updater] update downloaded: ${info.version}`)
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow
+    if (win === null || win.isDestroyed()) return
+    void dialog
+      .showMessageBox(win, {
+        type: 'info',
+        title: 'dsh-desktop 更新',
+        message: `新版本 v${info.version} 已下载完成`,
+        detail: '重启应用即可生效。是否立即重启？',
+        buttons: ['立即重启', '稍后'],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      .then(({ response }) => {
+        if (response === 0) {
+          // quit → before-quit stops the engine → autoInstallOnAppQuit installs.
+          app.quit()
+        }
+      })
+  })
+}
+
+/**
+ * Resolve the update feed (settings choice → probe in auto mode), point
+ * electron-updater at it and check. On failure from a non-GitHub source,
+ * fall back to GitHub and retry once — a GitCode mirror outage must not hide
+ * updates for users who can reach GitHub.
+ */
+async function checkUpdatesWithFallback(): Promise<void> {
+  if (!app.isPackaged) return // updates only exist in packaged builds
+  const choice: UpdateSourceChoice = settings.get().updateSource ?? 'auto'
+  const source = await resolveSource(choice)
+  console.log(`[updater] feed: ${source.id} (${source.name})`)
+  autoUpdater.setFeedURL(source.feed)
+  try {
+    await autoUpdater.checkForUpdates()
+  } catch (error) {
+    if (source.id !== 'github') {
+      console.warn(`[updater] ${source.id} 源检查失败（${String((error as Error).message ?? error).slice(0, 120)}），降级 GitHub`)
+      const github = sourceById('github')
+      if (github !== null) {
+        autoUpdater.setFeedURL(github.feed)
+        await autoUpdater.checkForUpdates()
+        return
+      }
+    }
+    console.error('[updater] check failed:', error)
+  }
+}
+
 async function boot(): Promise<void> {
   createWindow()
   installMenu()
+  setupAutoUpdater()
   // Clipboard: let the engine UI (an http://127.0.0.1 page) use the async
   // Clipboard API, and start watching for system clipboard changes.
   allowClipboardPermissions(session.defaultSession)
@@ -315,7 +431,7 @@ async function boot(): Promise<void> {
   await startEngine()
   if (process.env.DSH_DESKTOP_OPEN_MANAGER === '1') createManagerWindow()
   if (app.isPackaged && settings.get().autoCheckUpdates === true) {
-    autoUpdater.checkForUpdates().catch(() => { /* offline or not configured */ })
+    void checkUpdatesWithFallback().catch(() => { /* offline or not configured */ })
   }
 }
 
@@ -385,6 +501,7 @@ ipcMain.handle('updater:engine-version', async () => ({
   installed: installedEngineVersion({ engineDir: engineDir(), dshHome: dshHome() }),
   latest: await latestEngineVersion(),
 }))
+ipcMain.handle('updater:probe-sources', () => probeAllSources())
 ipcMain.handle('updater:backup', () => backupDshHome({ engineDir: engineDir(), dshHome: dshHome() }))
 ipcMain.handle('updater:apply', async () => {
   const scripts = ['install-engine.mjs', 'rebuild-engine.mjs']

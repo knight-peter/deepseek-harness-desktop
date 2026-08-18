@@ -8,6 +8,8 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+export type UpdateSourceChoice = 'auto' | 'github' | 'gitcode'
+
 export interface Settings {
   /** Dev mode: path to a deepseek-harness checkout whose built CLI runs the engine. */
   checkoutPath?: string
@@ -15,6 +17,8 @@ export interface Settings {
   inspectPort?: number
   /** Whether to check for engine updates on launch. */
   autoCheckUpdates?: boolean
+  /** App update feed: auto (GitCode first, GitHub fallback), or a fixed source. */
+  updateSource?: UpdateSourceChoice
 }
 
 const DEFAULTS: Settings = {}

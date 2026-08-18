@@ -20,6 +20,7 @@
     "rebuild-engine": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/rebuild-engine.mjs",
     "smoke": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/smoke.mjs",
     "publish-x64": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/publish-x64.mjs",
+    "sync-domestic": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/sync-domestic.mjs",
     "release": "node scripts/bump-version.mjs"
   },
   "dependencies": {
