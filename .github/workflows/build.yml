@@ -72,7 +72,14 @@ jobs:
         # appends the `--` itself to the script line (yargs then treats it as a
         # positional separator and the flag is ignored), so write the args
         # WITHOUT a leading `--`: `pnpm run build --publish never`.
+        # macOS runners default to a 256-file-descriptor limit — far below
+        # what packaging the engine's ~200k-file node_modules needs (the mac
+        # build dies with EMFILE: too many open files during the engine copy).
+        # Raise the limit for this step; try progressively smaller values in
+        # case the runner's hard limit is low, and always log the final value.
         run: |
+          ulimit -n 65536 2>/dev/null || ulimit -n 10240 2>/dev/null || true
+          echo "package step fd limit: $(ulimit -n)"
           # electron-builder treats an EMPTY CSC_LINK as a certificate path
           # ("allow to specify as empty string"), so an unset secret (GitHub
           # renders it as '') crashes with "<projectDir> not a file". Only
