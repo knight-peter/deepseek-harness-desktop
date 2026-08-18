@@ -79,7 +79,7 @@ pnpm run publish-x64 -- --tag v0.1.1  # 或显式指定
 
 `bump-version`（`pnpm run release`）自动完成：读最新 `v*` tag → 累加 patch/minor/major → 更新 `package.json` version → commit（`release: vX.Y.Z`）→ 打 tag → 推送（触发 CI）。
 
-`publish-x64` 自动完成：计算本地 x64 产物的 sha512/size → 以 `-x64` 后缀名上传（`dsh-desktop-<版本>-x64.dmg` / `-x64-mac.zip`，electron-updater 靠文件名区分架构）→ 拉取 release 里已有的 `latest-mac.yml`（arm64 条目）→ 合并 x64 条目后覆盖上传 → **校验 release 多平台完整性**（mac x64+arm64 / windows / linux / 更新元数据，缺失会警告）。
+`publish-x64` 自动完成：计算本地 x64 产物的 sha512/size → 以 `-x64` 后缀名上传（`dsh-desktop-<版本>-x64.dmg` / `-x64-mac.zip`，electron-updater 靠文件名区分架构）→ 拉取 release 里已有的 `latest-mac.yml`（arm64 条目）→ 合并 x64 条目后覆盖上传 → **校验 release 多平台完整性**（mac x64+arm64 / windows / linux / 更新元数据，缺失会警告）→ **release 为 draft 时自动发布为公开**（`--keep-draft` 可跳过）。上传走 HTTP/1.1，避免大文件 HTTP/2 中断。
 
 > `--tag` 缺省时自动取最新 `v*` tag（与 release 刚生成的版本一致）；显式传 `--tag` 可覆盖。当前产物未签名/未公证（默认不签名策略），用户安装会弹系统警告，适合自测与内部使用；正式分发需配置 Developer ID 证书 + 公证凭据。
 
