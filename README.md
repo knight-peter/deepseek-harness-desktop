@@ -36,24 +36,31 @@ pnpm run install-engine   # 首次：把锁定版本引擎装进 resources/engin
 pnpm dev                  # 编译并启动（引擎从 resources/engine 或 DSH_CHECKOUT 解析）
 ```
 
-常用命令：`pnpm build`（打包当前平台产物到 `release/`）、`pnpm run typecheck` / `lint` / `smoke`、`pnpm run release`（发布入口，见下）。完整命令表、环境分层、踩坑记录见 **[`docs/开发总结.md`](docs/开发总结.md)** 第二章。
+常用命令：`pnpm build`（打包当前平台产物到 `release/`）、`pnpm run typecheck` / `lint` / `smoke`、`pnpm run release`（发布入口，见下）。完整命令表、环境分层、踩坑记录见 **[`docs/Electron基座应用开发.md`](docs/Electron基座应用开发.md)**（第二章开发工作流、第三章打包全流程）。
 
 > ⚠️ 打包命令是 **`pnpm build`**（或 `pnpm run build`）。不要用 `pnpm pack`——那是 pnpm 内置命令（等价 `npm pack`，打 tarball），不会执行本项目的打包脚本。
 
 ## 发布流程（速览）
 
-发新版本 = **打 tag 推 GitHub → CI 三平台打包 → 本机补 Intel x64 → 本机同步 GitCode 镜像**：
+发新版本 = **打 tag 推 GitHub → CI 三平台打包 → 本机补 mac 包 → 本机同步 GitCode 镜像**：
 
 ```sh
-pnpm run release              # 唯一可显式带版本号的命令（可选 --minor/--major/--version x.y.z）；
-                              # 默认自动累加版本 + commit + tag + push，触发 CI
-pnpm build && pnpm run publish-x64    # CI 全绿后，本机补发 Intel x64 包并合并进 release
-pnpm run sync-domestic        # 同步 GitCode 国内镜像（x64 直传，全自动）
+pnpm run release                    # 唯一可显式带版本号的命令（可选 --minor/--major/--version x.y.z）；
+                                    # 默认自动累加版本 + commit + tag + push，触发 CI
+
+# CI 全绿后（release 是 draft，需发布为公开）：
+pnpm run publish-release         # 默认：只把 CI 建的 draft release 发布为公开（任何机器）
+pnpm build && pnpm run publish-release --with-x64  # Intel Mac 本机：补发 x64 包并合并进 release，再发布
+
+pnpm run download-release           # 用 gh CLI 下载 GitHub release 全平台产物（完整镜像前置）
+pnpm run sync-domestic --dir release/mirror   # 上传到 GitCode 国内镜像
 ```
 
-版本号唯一来源是 `package.json` 的 `version`（tag 恒为 `v<version>`）：除 `release` 可用 `--version` 显式指定外，其余命令都不带版本参数，自动读取。详细流程、签名与公证（ad-hoc → Developer ID）、GitCode 镜像维护见 **[`docs/开发总结.md`](docs/开发总结.md)** 第四章。
+版本号唯一来源是 `package.json` 的 `version`（tag 恒为 `v<version>`）：除 `release` 可用 `--version` 显式指定外，其余命令都不带版本参数，自动读取。**完整发布流程、命令详解、签名/公证、GitCode 镜像、环境坑见 [`docs/发布总结.md`](docs/发布总结.md)**。
 
 ## 文档
 
 - **[`docs/使用总结.md`](docs/使用总结.md)** — 使用总结：安装、界面、插件、更新、故障排查（终端用户）
-- **[`docs/开发总结.md`](docs/开发总结.md)** — 开发总结：仓库结构、核心机制、插件开发、测试验证、发布流程（开发者/插件作者）
+- **[`docs/发布总结.md`](docs/发布总结.md)** — 发布总结：发版全流程、命令详解、GitCode 镜像、环境坑（发版操作者）
+- **[`docs/Electron基座应用开发.md`](docs/Electron基座应用开发.md)** — Electron 基座开发：Electron 基础、引擎托管、打包、更新（开发者）
+- **[`docs/dsh插件开发.md`](docs/dsh插件开发.md)** — dsh 插件开发：三类插件、模板逐行讲解、调试与发布（插件作者）
