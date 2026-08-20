@@ -82,7 +82,7 @@ async function main() {
   const patterns = ['*.dmg', '*.zip', '*.exe', '*.AppImage', 'latest-*.yml']
   console.log(`download-release: downloading ${tag} (via gh CLI) → ${dir}`)
   sh(
-    `gh release download ${tag} --dir ${JSON.stringify(dir)} ` +
+    `gh release download ${tag} --dir ${JSON.stringify(dir)} --clobber ` +
       patterns.map((p) => `--pattern ${JSON.stringify(p)}`).join(' '),
   )
 

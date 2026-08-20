@@ -4,9 +4,13 @@
 # runs under ELECTRON_RUN_AS_NODE), satisfy package.json engines
 # `>=22.19.0`, and keep `node --env-file-if-exists` (Node ≥ 22.9) available
 # for the .env.local loading used by build/publish scripts.
-# pnpm is pinned to 11 to match the CI workflow (.github/workflows/build.yml).
+#
+# pnpm is pinned to 11 via the `npm:` backend (NOT the default aqua backend):
+# `aqua:pnpm/pnpm` only ships darwin/arm64 builds, so on Intel Macs (x64)
+# `mise install` fails with "unsupported env: darwin/amd64". The npm backend
+# installs pnpm 11.22.0 as an npm package, which works on every platform.
 #
 # After editing: `mise install` to fetch these versions, `mise use` to trust.
 [tools]
 node = "24"
-pnpm = "11"
+"npm:pnpm" = "10.33.2"

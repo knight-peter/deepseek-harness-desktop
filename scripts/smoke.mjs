@@ -38,7 +38,9 @@ function fail(message) {
 async function main() {
   const bin = resolveBin()
   console.log(`smoke: engine bin = ${bin}`)
-  const child = spawn(electronBin, ['--expose-internals', bin, '--profile', 'web', '--port', '0'], {
+  // `--no-open` mirrors the shell (harness.ts): the engine must not pop the
+  // system browser open during a headless smoke run.
+  const child = spawn(electronBin, ['--expose-internals', bin, '--profile', 'web', '--port', '0', '--no-open'], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   })

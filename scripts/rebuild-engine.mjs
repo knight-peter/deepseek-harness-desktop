@@ -3,6 +3,14 @@
  * N-API prebuilds (path contains `prebuilt`) need no rebuild and are
  * skipped; any other `.node` binary is rebuilt with @electron/rebuild
  * against the Electron version in this workspace.
+ *
+ * Engine dir: `resources/engine` under this script's repo root by default
+ * (dev/CI). A packaged app passes the real location via DSH_ENGINE_DIR
+ * (same convention as install-engine.mjs). The `electron-rebuild` binary
+ * lives in devDependencies and is NOT shipped in the packaged app — when it
+ * is absent we exit 0 with a note: the registry engine ships N-API prebuilds
+ * which are ABI-stable across Node and Electron, so packaged-mode updates
+ * can safely skip the rebuild step.
  * @module dsh-desktop/rebuild-engine
  */
 
@@ -12,7 +20,9 @@ import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const ENGINE_DIR = join(ROOT, 'resources', 'engine')
+const ENGINE_DIR = process.env.DSH_ENGINE_DIR !== undefined
+  ? resolve(process.env.DSH_ENGINE_DIR)
+  : join(ROOT, 'resources', 'engine')
 
 function findNativeModules(dir, out = []) {
   if (!existsSync(dir)) return out
@@ -39,6 +49,10 @@ for (const file of natives) console.log(`  ${file}`)
 // spawnSync, and `.cmd` files require shell:true); elsewhere it is a plain
 // executable.
 const bin = join(ROOT, 'node_modules', '.bin', `electron-rebuild${process.platform === 'win32' ? '.cmd' : ''}`)
+if (!existsSync(bin)) {
+  console.log(`rebuild-engine: ${bin} not found — @electron/rebuild is a devDependency and is not shipped in packaged apps; the registry engine's N-API prebuilds are ABI-stable, skipping rebuild`)
+  process.exit(0)
+}
 const result = spawnSync(bin, ['-m', ENGINE_DIR], { stdio: 'inherit', shell: process.platform === 'win32', windowsHide: true })
 if (result.status !== 0) {
   console.error(`rebuild-engine: electron-rebuild failed (exit ${String(result.status)})`)

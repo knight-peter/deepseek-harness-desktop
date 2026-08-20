@@ -107,7 +107,10 @@ export class Harness {
     // (node-addon-require-builtin) silently fails, so bare plugin specifiers
     // would not resolve; `--expose-internals` makes the loader use its plain
     // require fallback instead (verified on Electron 43 / embedded Node 24).
-    const child = spawn(process.execPath, ['--expose-internals', ...(options.nodeArgs ?? []), options.dshBin, '--profile', 'web', '--port', '0'], {
+    // `--no-open`: the engine would otherwise pop the system browser open to
+    // the served URL (observed as a stray tab, e.g. http://127.0.0.1:60829);
+    // the shell shows the UI in its own BrowserWindow, so never open a browser.
+    const child = spawn(process.execPath, ['--expose-internals', ...(options.nodeArgs ?? []), options.dshBin, '--profile', 'web', '--port', '0', '--no-open'], {
       cwd: options.cwd ?? homedir(),
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...options.env },
       stdio: ['ignore', 'pipe', 'pipe'],

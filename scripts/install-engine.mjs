@@ -9,9 +9,16 @@
  * verification — a failed install leaves the old engine untouched
  * (Phase 5 acceptance: 模拟升级失败不破坏旧引擎).
  *
- * Package manager: npm when available (plain layout), else pnpm from PATH
- * (the packaged shell shims `pnpm` + `node`; symlinked layout is fine for
- * require.resolve as long as both engine packages share one tree).
+ * Package manager: pnpm first, npm as fallback (why: npm 11 stalls for
+ * minutes on slow/proxy registries with zero output; pnpm fetches
+ * concurrently, retries fast and reuses its store — see packageManager()).
+ * The packaged shell shims `pnpm` + `node`; the symlinked pnpm layout is
+ * fine for require.resolve as long as both engine packages share one tree.
+ *
+ * Engine dir: `resources/engine` under this script's repo root by default
+ * (dev/CI). In a packaged app scripts/ runs from inside the read-only asar,
+ * so the caller passes the real location via DSH_ENGINE_DIR
+ * (src/main/index.ts `updater:apply` → `process.resourcesPath/engine`).
  * @module dsh-desktop/install-engine
  */
 
@@ -21,7 +28,9 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const ENGINE_DIR = join(ROOT, 'resources', 'engine')
+const ENGINE_DIR = process.env.DSH_ENGINE_DIR !== undefined
+  ? resolve(process.env.DSH_ENGINE_DIR)
+  : join(ROOT, 'resources', 'engine')
 const STAGING_DIR = `${ENGINE_DIR}.new`
 const ENGINE_MANIFEST = join(ENGINE_DIR, 'engine.json')
 
@@ -56,8 +65,8 @@ function pmSpawn(command, args, options = {}) {
   return spawnSync(command, args, { ...options, shell: process.platform === 'win32', windowsHide: true })
 }
 
-function run(command, args, cwd) {
-  const result = pmSpawn(command, args, { cwd, stdio: 'inherit' })
+function run(command, args, cwd, extraEnv = {}) {
+  const result = pmSpawn(command, args, { cwd, stdio: 'inherit', env: { ...process.env, ...extraEnv } })
   if (result.status !== 0) {
     console.error(`install-engine: ${command} ${args.join(' ')} failed (exit ${String(result.status)})`)
     return false
@@ -65,9 +74,24 @@ function run(command, args, cwd) {
   return true
 }
 
+/**
+ * Resolve the package manager, **pnpm first, npm as fallback**.
+ *
+ * Why pnpm first (2026-08-20 实测): on a proxy/Slow-registry network npm 11
+ * stalls for minutes in the resolution phase with zero output — the engine
+ * tree (547 deps) fetches packuments serially and a single hanging TCP
+ * connection (e.g. fake-ip proxies, 198.18.0.0/15) blocks until npm's
+ * default 5-minute fetch timeout, showing only the spinner. pnpm fetches
+ * concurrently, retries fast, and reuses its content-addressable store
+ * (the same engine installs in ~30s). It also matches the packaged app,
+ * which shims pnpm for engine updates anyway.
+ *
+ * `npm_config_strict_dep_builds=false`（installInto 里以 env 传入）让 pnpm 11
+ * （CI 默认 strict=true）不因忽略构建脚本而硬失败；pnpm 10 默认即 false。
+ */
 function packageManager() {
-  if (pmSpawn(pmCommand('npm'), ['--version'], { stdio: 'ignore' }).status === 0) return 'npm'
   if (pmSpawn(pmCommand('pnpm'), ['--version'], { stdio: 'ignore' }).status === 0) return 'pnpm'
+  if (pmSpawn(pmCommand('npm'), ['--version'], { stdio: 'ignore' }).status === 0) return 'npm'
   return null
 }
 
@@ -76,8 +100,25 @@ function installInto(dir, pm, dependencies) {
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'package.json'), `${JSON.stringify({ name: 'dsh-desktop-engine', private: true, dependencies }, null, 2)}\n`)
   const cmd = pmCommand(pm)
-  if (pm === 'npm') return run(cmd, ['install', '--no-audit', '--no-fund', '--prefix', dir], dir)
-  return run(cmd, ['install', '--dir', dir], dir)
+  if (pm === 'npm') {
+    // npm fallback: shorter fetch timeouts so a hanging registry connection
+    // fails fast and retries instead of stalling for minutes.
+    return run(cmd, ['install', '--no-audit', '--no-fund', '--prefix', dir, '--fetch-timeout=60000', '--fetch-retries=5', '--fetch-retry-mintimeout=1000', '--fetch-retry-maxtimeout=30000'], dir)
+  }
+  // An empty pnpm-workspace.yaml makes `dir` its own workspace root: without
+  // it pnpm walks UP from `dir` and finds the dsh-desktop repo's
+  // pnpm-workspace.yaml, treats `dir` as a workspace member, and `pnpm
+  // install --dir` then completes in <1s installing NOTHING (verified
+  // 2026-08-20). With it, the engine installs standalone.
+  // strict-dep-builds is a config-file key, not a CLI flag (pnpm rejects the
+  // flag form); npm_config_* env is honored by pnpm 10/11 alike, so CI's
+  // pnpm 11 (strict=true by default) won't hard-fail on ignored builds.
+  // --node-linker=hoisted: pnpm's default symlinked layout puts packages
+  // under a dot-dir `node_modules/.pnpm`, where the engine's resource loader
+  // fails to intercept non-JS imports (boot dies with ERR_UNKNOWN_FILE_EXTENSION
+  // on katex.min.css; verified 2026-08-20). The hoisted flat layout boots fine.
+  writeFileSync(join(dir, 'pnpm-workspace.yaml'), '')
+  return run(cmd, ['install', '--dir', dir, '--node-linker=hoisted'], dir, { npm_config_strict_dep_builds: 'false' })
 }
 
 /** Registry install with pinned versions. */
@@ -190,7 +231,7 @@ function writeManifest(source, dir = ENGINE_DIR) {
 
 function main() {
   const pm = packageManager()
-  if (pm === null) fail('neither npm nor pnpm is available on PATH')
+  if (pm === null) fail(`neither npm nor pnpm is available on PATH (PATH=${process.env.PATH ?? ''}) — a packaged app needs its runtime-bin shims, see updater:apply`)
   console.log(`install-engine: package manager = ${pm}`)
 
   const existing = existsSync(ENGINE_DIR) && readdirSync(ENGINE_DIR).some((name) => name === 'node_modules')

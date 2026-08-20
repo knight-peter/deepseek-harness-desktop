@@ -205,6 +205,13 @@ document.getElementById('apply-update-btn').addEventListener('click', async () =
   updateResult.textContent = '正在重装引擎（npm install，可能耗时数分钟）…'
   updateResult.className = 'muted'
   const result = await api.applyUpdate()
-  updateResult.textContent = result.ok ? '引擎更新完成，已重启' : `引擎更新失败（exit ${String(result.exitCode)}）：\n${result.output.slice(-1200)}`
+  if (result.ok) {
+    updateResult.textContent = '引擎更新完成，已重启'
+  } else {
+    const hint = result.output.includes('neither npm nor pnpm is available on PATH')
+      ? '\n（发布版内置 pnpm 垫片，仍报此错说明运行时未把垫片加入 PATH——请将应用升级到修复版本）'
+      : ''
+    updateResult.textContent = `引擎更新失败（exit ${String(result.exitCode)}）：\n${result.output.slice(-1200)}${hint}`
+  }
   updateResult.className = result.ok ? 'ok' : 'err'
 })

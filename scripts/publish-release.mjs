@@ -1,18 +1,28 @@
 /**
- * Publish the locally-built macOS artifacts of one architecture into the
- * GitHub release that CI created for the other architecture, and merge the
- * entries into latest-mac.yml so electron-updater can serve both.
+ * Publish the CI-created GitHub draft release as public, and — when run on
+ * an Intel Mac — optionally merge the locally-built x64 macOS artifacts into
+ * the same release (CI ships arm64; there is no Intel macOS runner on
+ * GitHub anymore, macos-13 retired).
  *
- * Background (see docs/开发总结.md §4.1/§4.4): the CI mac runner (macos-15) is
- * arm64 and ships the Apple Silicon package; there is no Intel macOS runner
- * on GitHub anymore (macos-13 retired), so the x64 package is built locally
- * (`pnpm build` on an Intel Mac) and merged here. electron-updater matches
- * files by the architecture string in the file name, so artifacts must be
- * uploaded under arch-suffixed names (`dsh-desktop-<v>-x64.dmg` / `-arm64`).
+ * Two modes (default = publish-only, the common case):
+ *   - default:            `pnpm run publish-release` — flip the draft release
+ *                         to public, nothing else. Works on ANY machine,
+ *                         including Apple Silicon Macs (CI already built
+ *                         arm64, nothing local to upload).
+ *   - --with-x64:         `pnpm build` on an Intel Mac, then
+ *                         `pnpm run publish-release --with-x64` — uploads the
+ *                         local x64 dmg/zip under `-x64` names, merges
+ *                         latest-mac.yml (arm64+x64), verifies completeness,
+ *                         then publishes the draft.
+ *
+ * electron-updater matches files by the architecture string in the file
+ * name, so artifacts must be uploaded under arch-suffixed names
+ * (`dsh-desktop-<v>-x64.dmg` / `-arm64`).
  *
  * Usage:
- *   GH_TOKEN=<token> node scripts/publish-x64.mjs
- *   GH_TOKEN=<token> node scripts/publish-x64.mjs --arch arm64
+ *   GH_TOKEN=<token> node scripts/publish-release.mjs                  # publish draft
+ *   GH_TOKEN=<token> node scripts/publish-release.mjs --with-x64       # Intel: upload+merge+publish
+ *   GH_TOKEN=<token> node scripts/publish-release.mjs --keep-draft     # publish-only, stay draft
  *
  * Version source: the version is read from package.json's `version` field
  * (the single source of truth after `pnpm run release` — the `v<version>`
@@ -23,7 +33,7 @@
  * which names single-arch output without a suffix) and uploaded under the
  * arch-suffixed name. Requires a GitHub token with `repo` scope; the target
  * release must already exist (created by CI's publish step).
- * @module dsh-desktop/publish-x64
+ * @module dsh-desktop/publish-release
  */
 
 import { createHash } from 'node:crypto'
@@ -45,18 +55,39 @@ if (OWNER === undefined || OWNER === '' || REPO === undefined || REPO === '') {
 }
 
 function fail(message) {
-  console.error(`publish-x64: ${message}`)
+  console.error(`publish-release: ${message}`)
   process.exit(1)
 }
 
 function parseArgs(argv) {
-  const args = { tag: null, arch: 'x64' }
+  const args = { tag: null, arch: 'x64', withX64: false, keepDraft: false }
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--tag') args.tag = argv[++i] ?? null
     else if (argv[i] === '--arch') args.arch = argv[++i] ?? 'x64'
+    else if (argv[i] === '--with-x64') args.withX64 = true
+    else if (argv[i] === '--keep-draft') args.keepDraft = true
   }
   if (args.arch !== 'x64' && args.arch !== 'arm64') fail(`unsupported --arch ${args.arch} (x64|arm64)`)
   return args
+}
+
+/**
+ * Flip a draft release to public (or report it is already public). Used by
+ * both the x64 merge flow and the standalone `--publish-only` mode so that
+ * releasing a draft never depends on having an Intel machine to merge x64.
+ */
+async function publishDraft(release, tag) {
+  const releaseDetail = await gh(`/repos/${OWNER}/${REPO}/releases/${release.id}`)
+  if (releaseDetail.draft) {
+    await gh(`/repos/${OWNER}/${REPO}/releases/${release.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draft: false }),
+    })
+    console.log(`publish-release: ✅ published draft release ${tag} (now public)`)
+  } else {
+    console.log(`publish-release: release ${tag} is already public (not a draft)`)
+  }
 }
 
 /** Release tag for the current version: `v` + package.json `version`. */
@@ -124,11 +155,11 @@ async function verifyRelease(releaseId, tag, version) {
   const has = (pattern) => names.some((n) => pattern.test(n))
   const missing = []
   const report = (label, present) => {
-    console.log(`publish-x64:   ${present ? '✓' : '✗'} ${label}`)
+    console.log(`publish-release:   ${present ? '✓' : '✗'} ${label}`)
     if (!present) missing.push(label)
   }
 
-  console.log(`publish-x64: release ${tag} completeness:`)
+  console.log(`publish-release: release ${tag} completeness:`)
   report(`mac arm64 dmg (${version}-arm64.dmg)`, has(new RegExp(`dsh-desktop-${version}-arm64\\.dmg$`)))
   report(`mac arm64 zip (${version}-arm64-mac.zip)`, has(new RegExp(`dsh-desktop-${version}-arm64-mac\\.zip$`)))
   report(`mac x64 dmg (${version}-x64.dmg)`, has(new RegExp(`dsh-desktop-${version}-x64\\.dmg$`)))
@@ -140,10 +171,10 @@ async function verifyRelease(releaseId, tag, version) {
   report('latest-linux.yml (linux update metadata)', has(/^latest-linux\.yml$/))
 
   if (missing.length > 0) {
-    console.warn(`publish-x64: ⚠️ release ${tag} is MISSING: ${missing.join(', ')}`)
-    console.warn('publish-x64:   CI may still be running, or a platform failed. Verify before announcing the release.')
+    console.warn(`publish-release: ⚠️ release ${tag} is MISSING: ${missing.join(', ')}`)
+    console.warn('publish-release:   CI may still be running, or a platform failed. Verify before announcing the release.')
   } else {
-    console.log(`publish-x64: ✅ release ${tag} is complete (mac x64+arm64 / windows / linux / update metadata)`)
+    console.log(`publish-release: ✅ release ${tag} is complete (mac x64+arm64 / windows / linux / update metadata)`)
   }
   return missing
 }
@@ -194,17 +225,17 @@ async function uploadAsset(uploadUrl, assetName, data) {
     try {
       const result = await uploadHttp1(uploadUrl, assetName, data)
       if (result.ok) {
-        console.log(`publish-x64: uploaded ${assetName}`)
+        console.log(`publish-release: uploaded ${assetName}`)
         return
       }
       if (result.status === 422) {
-        console.log(`publish-x64: asset ${assetName} already exists — skipping`)
+        console.log(`publish-release: asset ${assetName} already exists — skipping`)
         return
       }
       throw new Error(`upload ${assetName} failed: ${result.status} ${result.body.slice(0, 300)}`)
     } catch (error) {
       if (attempt === 3) throw error
-      console.warn(`publish-x64: upload ${assetName} attempt ${attempt} failed (${String(error.message ?? error).slice(0, 120)}), retrying…`)
+      console.warn(`publish-release: upload ${assetName} attempt ${attempt} failed (${String(error.message ?? error).slice(0, 120)}), retrying…`)
       await new Promise((resolve) => setTimeout(resolve, 2000 * attempt))
     }
   }
@@ -216,7 +247,7 @@ async function replaceAsset(releaseId, uploadUrl, assetName, data) {
   for (const asset of assets) {
     if (asset.name === assetName) {
       await gh(`/repos/${OWNER}/${REPO}/releases/assets/${asset.id}`, { method: 'DELETE' })
-      console.log(`publish-x64: deleted old ${assetName}`)
+      console.log(`publish-release: deleted old ${assetName}`)
     }
   }
   await uploadAsset(uploadUrl, assetName, data)
@@ -345,20 +376,35 @@ function exists(path) {
 }
 
 async function main() {
-  const { tag: tagArg, arch } = parseArgs(process.argv.slice(2))
+  const { tag: tagArg, arch, withX64, keepDraft } = parseArgs(process.argv.slice(2))
   if (TOKEN === undefined || TOKEN === '') fail('GH_TOKEN env var is required')
 
   // Tag resolution: explicit --tag wins; otherwise use the package.json
   // version (after `pnpm run release` it always matches the release CI just
-  // built, so a plain `pnpm run publish-x64` needs no arguments).
+  // built, so a plain `pnpm run publish-release` needs no arguments).
   const tag = tagArg ?? packageTag()
   if (tag === null) fail('cannot read version from package.json; pass --tag <vX.Y.Z> to override')
 
   const release = await getRelease(tag).catch((error) => fail(`release ${tag} not found: ${error.message}`))
-  console.log(`publish-x64: release ${tag} (id ${release.id})`)
+  console.log(`publish-release: release ${tag} (id ${release.id})`)
 
+  if (!withX64) {
+    // DEFAULT: publish-only. Flip the CI-created draft to public WITHOUT
+    // touching local artifacts — the common case on any machine.
+    console.log(`publish-release: default mode — publishing draft ${tag} (use --with-x64 on an Intel Mac to also merge x64)`)
+    if (keepDraft) {
+      console.log(`publish-release: --keep-draft — leaving release ${tag} as draft`)
+    } else {
+      await publishDraft(release, tag)
+    }
+    console.log('publish-release: done')
+    return
+  }
+
+  // --with-x64 (Intel Mac): upload local x64, merge latest-mac.yml, verify,
+  // then publish.
   const { version, artifacts } = loadLocalArtifacts(arch)
-  console.log(`publish-x64: local ${arch} artifacts (version ${version}):`)
+  console.log(`publish-release: --with-x64 — local ${arch} artifacts (version ${version}):`)
   for (const a of artifacts) console.log(`  ${a.localPath} -> ${a.remoteName} (${a.info.size} bytes)`)
 
   for (const artifact of artifacts) {
@@ -369,35 +415,22 @@ async function main() {
   const merged = mergeUpdateInfo(existing, artifacts.map((a) => ({ url: a.remoteName, sha512: a.info.sha512, size: a.info.size })))
   const ymlText = serializeUpdateInfo(merged)
   await replaceAsset(release.id, release.uploadUrl, 'latest-mac.yml', Buffer.from(ymlText, 'utf8'))
-  console.log('publish-x64: latest-mac.yml updated:')
+  console.log('publish-release: latest-mac.yml updated:')
   console.log(ymlText)
 
   await verifyRelease(release.id, tag, version)
 
-  // Auto-publish: CI creates the release as a draft; once x64 is merged and
-  // the release is complete, flip it to a public release so users can
-  // download it. `--keep-draft` opts out.
-  if (!process.argv.includes('--keep-draft')) {
-    const releaseDetail = await gh(`/repos/${OWNER}/${REPO}/releases/${release.id}`)
-    if (releaseDetail.draft) {
-      await gh(`/repos/${OWNER}/${REPO}/releases/${release.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ draft: false }),
-      })
-      console.log(`publish-x64: ✅ published draft release ${tag} (now public)`)
-    } else {
-      console.log(`publish-x64: release ${tag} is already public (not a draft)`)
-    }
+  if (keepDraft) {
+    console.log(`publish-release: --keep-draft — leaving release ${tag} as draft`)
   } else {
-    console.log(`publish-x64: --keep-draft — leaving release ${tag} as draft`)
+    await publishDraft(release, tag)
   }
 
-  console.log('publish-x64: done')
+  console.log('publish-release: done')
 }
 
 void main().catch((error) => {
-  console.error(`publish-x64: ${String(error.message ?? error)}`)
+  console.error(`publish-release: ${String(error.message ?? error)}`)
   process.exit(1)
 })
 // Explicit exit: some sockets (the draft-check request) may still be open

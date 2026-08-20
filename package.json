@@ -20,7 +20,7 @@
     "install-engine": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/install-engine.mjs",
     "rebuild-engine": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/rebuild-engine.mjs",
     "smoke": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/smoke.mjs",
-    "publish-x64": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/publish-x64.mjs",
+    "publish-release": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/publish-release.mjs",
     "sync-domestic": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/sync-domestic.mjs",
     "download-release": "node scripts/download-release.mjs",
     "release": "node scripts/bump-version.mjs"
@@ -28,7 +28,7 @@
   "dependencies": {
     "electron-updater": "^6.8.9",
     "js-yaml": "^4.1.0",
-    "pnpm": "^11.22.0"
+    "pnpm": "^10.33.2"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",

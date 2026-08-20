@@ -29,8 +29,25 @@ let managerWindow: BrowserWindow | null = null
 let engineUiLoaded = false
 let lastDump = ''
 let quitting = false
-/** True while a check was triggered from the menu (needs a visible result). */
-let manualUpdateCheck = false
+
+// ── Manual update check state ───────────────────────────────────────────────
+// A menu-driven "检查应用更新" shows instant feedback (a small HUD), settles
+// through updater events via `finishManualCheck`, and is guarded against
+// re-entry. A hard timeout guarantees the HUD never waits forever.
+const UPDATE_CHECK_TIMEOUT_MS = 20_000
+let updateCheckInFlight = false
+let checkHudWindow: BrowserWindow | null = null
+
+type ManualCheckOutcome =
+  | { kind: 'available'; version: string }
+  | { kind: 'not-available' }
+
+type ManualCheckResult =
+  | { ok: true; outcome: ManualCheckOutcome }
+  | { ok: false; error: Error }
+
+/** Settles the in-flight manual check; set by runUpdateCheck, nulled on settle. */
+let finishManualCheck: ((result: ManualCheckResult) => void) | null = null
 
 const settings = new SettingsStore(app.getPath('userData'))
 
@@ -224,36 +241,57 @@ function createManagerWindow(): void {
 }
 
 /**
- * Environment for `dsh plugin` (and other CLI) commands: the system PATH
- * carries pnpm in dev; in a packaged app, a userData shim provides `node`
- * (→ the Electron binary) and a `pnpm` launcher reading pnpm.cjs from the
- * asar, so pnpm's shebangs resolve under our runtime.
+ * Environment for spawning Node/CLI helper scripts under Electron-as-node.
+ * In dev, the system PATH already carries node/pnpm (mise, nvm, …). In a
+ * packaged app the process is launched by the GUI (Finder/start menu) with a
+ * minimal PATH (`/usr/bin:/bin:…`), so npm/pnpm from user shells are never
+ * found — a userData `runtime-bin` shim provides both:
+ *  - `node` (symlink → Electron binary) — with ELECTRON_RUN_AS_NODE=1 the
+ *    Electron binary IS node;
+ *  - `pnpm` (launcher) → `exec <Electron binary> <asar pnpm.cjs> "$@"`.
+ * The shim dir is prepended to PATH, so scripts like install-engine.mjs and
+ * `dsh plugin` resolve pnpm with zero system dependencies. Shim write
+ * failures are non-fatal (a system pnpm then works as before).
  */
-function cliCommandEnv(): Record<string, string> {
+function runtimeBinEnv(): Record<string, string> {
   const env: Record<string, string> = { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
-  if (app.isPackaged) {
-    const shim = join(app.getPath('userData'), 'runtime-bin')
-    mkdirSync(shim, { recursive: true })
-    const nodeLink = join(shim, 'node')
-    if (!existsSync(nodeLink)) {
-      try {
-        symlinkSync(process.execPath, nodeLink)
-      } catch {
-        // non-fatal: pnpm may still run when a system node exists
-      }
+  if (!app.isPackaged) return env
+  const shim = join(app.getPath('userData'), 'runtime-bin')
+  mkdirSync(shim, { recursive: true })
+  const nodeLink = join(shim, 'node')
+  if (!existsSync(nodeLink)) {
+    try {
+      symlinkSync(process.execPath, nodeLink)
+    } catch {
+      // non-fatal: pnpm may still run when a system node exists
     }
-    const pnpmLauncher = join(shim, 'pnpm')
-    if (!existsSync(pnpmLauncher)) {
-      try {
-        const pnpmEntry = join(process.resourcesPath, 'app.asar', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
-        writeFileSync(pnpmLauncher, `#!/bin/sh\nexec "${process.execPath}" "${pnpmEntry}" "$@"\n`, { mode: 0o755 })
-      } catch {
-        // non-fatal: plugin install falls back to system pnpm if present
-      }
-    }
-    env.PATH = [shim, env.PATH ?? ''].join(delimiter)
   }
+  const pnpmLauncher = join(shim, 'pnpm')
+  const pnpmEntry = join(process.resourcesPath, 'app.asar', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
+  if (!existsSync(pnpmLauncher)) {
+    try {
+      // install-engine.mjs / plugins spawn `pnpm.cmd` on Windows (PATHEXT is
+      // not applied by spawnSync); a .cmd shim is required there, a plain
+      // shell launcher elsewhere.
+      if (process.platform === 'win32') {
+        const cmdLauncher = join(shim, 'pnpm.cmd')
+        if (!existsSync(cmdLauncher)) {
+          writeFileSync(cmdLauncher, `@"${process.execPath}" "${pnpmEntry}" %*\r\n`)
+        }
+      } else {
+        writeFileSync(pnpmLauncher, `#!/bin/sh\nexec "${process.execPath}" "${pnpmEntry}" "$@"\n`, { mode: 0o755 })
+      }
+    } catch {
+      // non-fatal: plugin install falls back to system pnpm if present
+    }
+  }
+  env.PATH = [shim, env.PATH ?? ''].join(delimiter)
   return env
+}
+
+/** Environment for `dsh plugin` (and other CLI) commands. */
+function cliCommandEnv(): Record<string, string> {
+  return runtimeBinEnv()
 }
 
 function pluginManager(): PluginManager {
@@ -278,17 +316,23 @@ function tools(): Tools {
   })
 }
 
+/** About-dialog text: the dsh-desktop project version and the installed dsh engine version — independent of each other. */
+function aboutMessage(): string {
+  const engine = installedEngineVersion({ engineDir: engineDir(), dshHome: dshHome() })
+  return [
+    `dsh-desktop v${app.getVersion()}`,
+    `dsh 引擎：${engine !== null ? `v${engine}` : '未安装'}`,
+  ].join('\n')
+}
+
 function installMenu(): void {
   const template: MenuItemConstructorOptions[] = [
     {
       label: 'dsh-desktop',
       submenu: [
-        { label: '关于 dsh-desktop', click: () => void dialog.showMessageBox({ message: `dsh-desktop\n引擎运行时：Electron 内嵌 Node ${process.versions.node}` }) },
+        { label: '关于 dsh-desktop', click: () => void dialog.showMessageBox({ message: aboutMessage() }) },
         { type: 'separator' },
-        { label: '检查应用更新…', visible: app.isPackaged, click: () => {
-          manualUpdateCheck = true
-          void checkUpdatesWithFallback()
-        } },
+        { id: 'check-updates', label: '检查应用更新…', visible: app.isPackaged, click: () => { void checkUpdatesWithFeedback() } },
         { type: 'separator' },
         { label: '退出', accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
       ],
@@ -336,9 +380,12 @@ function installMenu(): void {
  *
  * UX rules:
  *  - startup check is silent (no dialog when a new version exists, only logs);
+ *  - a manual check (menu) shows a progress HUD, then settles into a result
+ *    dialog — new version / already latest / failed (with retry) / timed out;
  *  - a downloaded update prompts the user with "restart now / later" —
  *    autoInstallOnAppQuit still covers the "quit later" path;
- *  - errors are logged only (an update failure must never block the app).
+ *  - errors never block the app: startup failures are logged only, manual
+ *    check failures surface in the result dialog.
  */
 function setupAutoUpdater(): void {
   if (!app.isPackaged) return // updates only exist in packaged builds
@@ -350,42 +397,22 @@ function setupAutoUpdater(): void {
     console.log('[updater] checking for updates')
   })
 
+  // Terminal events settle the awaiting manual check via `finishManualCheck`
+  // (the HUD closes and the result dialog is shown in checkUpdatesWithFeedback);
+  // a startup check stays silent because `finishManualCheck` is null then.
   autoUpdater.on('update-available', (info) => {
     console.log(`[updater] update available: ${info.version}`)
-    // Manual check → visible confirmation; startup check stays silent.
-    if (manualUpdateCheck) {
-      manualUpdateCheck = false
-      const win = BrowserWindow.getFocusedWindow() ?? mainWindow
-      if (win !== null && !win.isDestroyed()) {
-        void dialog.showMessageBox(win, {
-          type: 'info',
-          title: 'dsh-desktop 更新',
-          message: `发现新版本 v${info.version}`,
-          detail: '正在后台下载，下载完成后会提示重启应用。',
-          buttons: ['知道了'],
-        })
-      }
-    }
+    finishManualCheck?.({ ok: true, outcome: { kind: 'available', version: info.version } })
   })
 
   autoUpdater.on('update-not-available', () => {
     console.log('[updater] no update available')
-    if (manualUpdateCheck) {
-      manualUpdateCheck = false
-      const win = BrowserWindow.getFocusedWindow() ?? mainWindow
-      if (win !== null && !win.isDestroyed()) {
-        void dialog.showMessageBox(win, {
-          type: 'info',
-          title: 'dsh-desktop 更新',
-          message: '已是最新版本',
-          buttons: ['知道了'],
-        })
-      }
-    }
+    finishManualCheck?.({ ok: true, outcome: { kind: 'not-available' } })
   })
 
   autoUpdater.on('error', (error) => {
     console.error('[updater] error:', error)
+    finishManualCheck?.({ ok: false, error: error instanceof Error ? error : new Error(String(error)) })
   })
 
   autoUpdater.on('update-downloaded', (info) => {
@@ -436,6 +463,163 @@ async function checkUpdatesWithFallback(): Promise<void> {
       }
     }
     console.error('[updater] check failed:', error)
+  }
+}
+
+// ── Manual update check UI ──────────────────────────────────────────────────
+
+/** Small always-on-top HUD shown while a manual check is in flight. */
+const CHECK_HUD_HTML = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+    font: 13px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #e8e8ec; background: rgba(28, 28, 34, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 12px; box-sizing: border-box;
+    user-select: none; cursor: default;
+  }
+  .spinner {
+    width: 24px; height: 24px; border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, 0.22); border-top-color: #4f8cff;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div class="spinner"></div>
+  <div>正在检查更新…</div>
+</body>
+</html>`
+
+function showCheckingHud(): void {
+  if (checkHudWindow !== null) return
+  const win = new BrowserWindow({
+    width: 280,
+    height: 106,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    focusable: false,
+    show: false,
+    webPreferences: { sandbox: true, contextIsolation: true },
+  })
+  checkHudWindow = win
+  // Clicks pass through: the HUD must never block the app during the wait.
+  win.setIgnoreMouseEvents(true, { forward: true })
+  win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(CHECK_HUD_HTML)}`)
+  win.once('ready-to-show', () => win.show())
+  win.center()
+  win.on('closed', () => {
+    if (checkHudWindow === win) checkHudWindow = null
+  })
+}
+
+function closeCheckingHud(): void {
+  if (checkHudWindow !== null) {
+    checkHudWindow.destroy()
+    checkHudWindow = null
+  }
+}
+
+/** Disable/re-label the menu item while a manual check is in flight. */
+function setCheckMenuItemBusy(busy: boolean): void {
+  const item = Menu.getApplicationMenu()?.getMenuItemById('check-updates')
+  if (item === null || item === undefined) return
+  item.enabled = !busy
+  item.label = busy ? '正在检查更新…' : '检查应用更新…'
+}
+
+function showInfoDialog(message: string, detail?: string): Promise<void> {
+  const win = BrowserWindow.getFocusedWindow() ?? mainWindow
+  if (win === null || win.isDestroyed()) return Promise.resolve()
+  return dialog
+    .showMessageBox(win, { type: 'info', title: 'dsh-desktop 更新', message, detail, buttons: ['知道了'] })
+    .then(() => undefined)
+}
+
+/** Error dialog for a failed/timed-out manual check; resolves true when retrying. */
+function showCheckFailedDialog(error: Error): Promise<boolean> {
+  const win = BrowserWindow.getFocusedWindow() ?? mainWindow
+  if (win === null || win.isDestroyed()) return Promise.resolve(false)
+  return dialog
+    .showMessageBox(win, {
+      type: 'error',
+      title: 'dsh-desktop 更新',
+      message: '检查更新失败',
+      detail: `错误信息：${error.message.slice(0, 200)}`,
+      buttons: ['重试', '取消'],
+      defaultId: 0,
+      cancelId: 1,
+    })
+    .then(({ response }) => response === 0)
+}
+
+/**
+ * Await the next terminal updater event (or a hard timeout) for the manual
+ * check kicked off by checkUpdatesWithFallback(). Terminal events arrive via
+ * `finishManualCheck`; the timeout guarantees the HUD never waits forever.
+ */
+function runUpdateCheck(): Promise<ManualCheckResult> {
+  return new Promise((resolve) => {
+    const finish = (result: ManualCheckResult): void => {
+      if (finishManualCheck === null) return // already settled (event raced the timeout)
+      finishManualCheck = null
+      clearTimeout(timer)
+      resolve(result)
+    }
+    finishManualCheck = finish
+    const timer = setTimeout(() => {
+      finish({ ok: false, error: new Error(`检查超时（${UPDATE_CHECK_TIMEOUT_MS / 1000} 秒），请检查网络后重试`) })
+    }, UPDATE_CHECK_TIMEOUT_MS)
+    void checkUpdatesWithFallback().catch((error) => {
+      finish({ ok: false, error: error instanceof Error ? error : new Error(String(error)) })
+    })
+  })
+}
+
+/**
+ * Menu-driven update check with immediate feedback: a progress HUD while
+ * checking, then a result dialog — new version (download continues in the
+ * background), already latest, or failure/timeout with a retry option.
+ * Re-entry is guarded and the retry loop keeps that guard intact.
+ */
+async function checkUpdatesWithFeedback(): Promise<void> {
+  if (!app.isPackaged) return // updates only exist in packaged builds
+  if (updateCheckInFlight) return
+  updateCheckInFlight = true
+  try {
+    while (true) {
+      setCheckMenuItemBusy(true)
+      showCheckingHud()
+      const result = await runUpdateCheck()
+      closeCheckingHud()
+      if (result.ok) {
+        if (result.outcome.kind === 'available') {
+          await showInfoDialog(`发现新版本 v${result.outcome.version}`, '正在后台下载，下载完成后会提示重启应用。')
+        } else {
+          await showInfoDialog('已是最新版本')
+        }
+        return
+      }
+      const retry = await showCheckFailedDialog(result.error)
+      if (!retry) return
+      // loop: retry without releasing the in-flight guard or menu busy state
+    }
+  } finally {
+    closeCheckingHud()
+    setCheckMenuItemBusy(false)
+    updateCheckInFlight = false
   }
 }
 
@@ -530,12 +714,22 @@ ipcMain.handle('updater:engine-version', async () => ({
 ipcMain.handle('updater:probe-sources', () => probeAllSources())
 ipcMain.handle('updater:backup', () => backupDshHome({ engineDir: engineDir(), dshHome: dshHome() }))
 ipcMain.handle('updater:apply', async () => {
+  // The install/rebuild scripts must see pnpm: use the runtime-bin shim env
+  // (a packaged app's process.env.PATH is the minimal GUI PATH and never
+  // contains npm/pnpm from user shells — that is what made 应用引擎更新 fail
+  // with "neither npm nor pnpm is available on PATH").
+  const env = runtimeBinEnv()
+  // Packaged: scripts/ lives inside the read-only app.asar and derives the
+  // engine dir from its own location; hand it the real Resources/engine
+  // explicitly. Dev mode keeps the default (repo resources/engine).
+  if (app.isPackaged) env.DSH_ENGINE_DIR = join(process.resourcesPath, 'engine')
   const scripts = ['install-engine.mjs', 'rebuild-engine.mjs']
   let output = ''
   let ok = true
+  let exitCode: number | null = null
   for (const script of scripts) {
     const result = spawnSync(process.execPath, [join(app.getAppPath(), 'scripts', script)], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      env,
       encoding: 'utf8',
       timeout: 600_000,
       windowsHide: true,
@@ -543,11 +737,12 @@ ipcMain.handle('updater:apply', async () => {
     output += `${result.stdout ?? ''}${result.stderr ?? ''}`
     if (result.status !== 0) {
       ok = false
+      exitCode = result.status
       break
     }
   }
   if (ok) await restartEngine()
-  return { ok, output }
+  return { ok, output, exitCode }
 })
 
 // ── lifecycle ──────────────────────────────────────────────────────────────
