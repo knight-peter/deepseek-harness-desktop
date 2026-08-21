@@ -186,6 +186,52 @@ async function restartEngine(): Promise<void> {
   await startEngine()
 }
 
+/**
+ * Install a native right-click context menu on a window. Electron shows no
+ * context menu by default, so without this, right-click is a no-op and mouse
+ * select + copy (e.g. engine UI messages) is unusable. Items adapt to the
+ * click target: editable fields get the full edit menu, selected text gets
+ * Copy, and links get copy/open actions.
+ */
+function installContextMenu(win: BrowserWindow): void {
+  win.webContents.on('context-menu', (_event, params) => {
+    const template: MenuItemConstructorOptions[] = []
+
+    if (params.isEditable) {
+      template.push(
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪切' },
+        { role: 'copy', label: '复制' },
+        { role: 'paste', label: '粘贴' },
+        { type: 'separator' },
+        { role: 'selectAll', label: '全选' },
+      )
+    } else if (params.selectionText !== '') {
+      template.push(
+        { role: 'copy', label: '复制' },
+        { type: 'separator' },
+        { role: 'selectAll', label: '全选' },
+      )
+    } else {
+      template.push({ role: 'selectAll', label: '全选' })
+    }
+
+    if (params.linkURL !== '') {
+      template.push(
+        { type: 'separator' },
+        { label: '复制链接地址', click: () => clipboard.writeText(params.linkURL) },
+        { label: '打开链接', click: () => void shell.openExternal(params.linkURL) },
+      )
+    }
+
+    if (template.length > 0) {
+      Menu.buildFromTemplate(template).popup({ window: win })
+    }
+  })
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -198,6 +244,7 @@ function createWindow(): void {
       sandbox: true,
     },
   })
+  installContextMenu(mainWindow)
   mainWindow.loadFile(join(import.meta.dirname, 'renderer/index.html'))
   mainWindow.on('closed', () => {
     mainWindow = null
@@ -231,6 +278,7 @@ function createManagerWindow(): void {
       sandbox: true,
     },
   })
+  installContextMenu(managerWindow)
   managerWindow.loadFile(join(import.meta.dirname, 'renderer/manager.html'))
   managerWindow.webContents.on('did-finish-load', () => {
     console.log('[manager] window loaded')

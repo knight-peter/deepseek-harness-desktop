@@ -330,6 +330,22 @@ PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engin
 - 已知边角：`windowsHide` + `stdio: 'inherit'` 有上游 issue（nodejs/node#17824），Windows 实机验收重点确认 pnpm/命令输出仍被正常捕获。
 - 本机（mac）已验证：preload 的 win32 分支可用 `Object.defineProperty(process, 'platform', { value: 'win32' })` 模拟 + 包装原函数断言；ESM 互操作、参数形态（含 `spawn(cmd, undefined, opts)` 边界）、幂等、darwin 无操作均已实测。Windows 打包版实机验收待 Windows 上执行。
 
+### 2.10 右键上下文菜单（context-menu）
+
+**问题**：窗口内右键无任何反应——引擎 UI（127.0.0.1 页面）、管理窗口、状态壳全部如此，导致「鼠标选中 → 右键 → 复制」这类基本操作不可用。
+
+**根因**：Electron 默认**不显示任何右键菜单**，必须由壳在主进程监听 `webContents` 的 `context-menu` 事件并自行 `Menu.popup()`。本仓库此前从未处理该事件，右键自然是个空操作；应用菜单（`Menu.setApplicationMenu`）只管菜单栏，与右键无关。引擎 UI 本身仅对 JSON 树展开器等两个小组件设了 `user-select: none`，正文文本可以正常选中——缺的只是右键菜单这一环。
+
+**修复（`src/main/index.ts` 的 `installContextMenu(win)`，`createWindow` / `createManagerWindow` 各自调用）**：
+
+- 按点击目标动态组菜单，文案与应用菜单保持一致（中文）：
+  - 可编辑区（`params.isEditable`）：撤销 / 重做 / 剪切 / 复制 / 粘贴 / 全选（全部用 `role`，走 Chromium 原生编辑命令，与页面 JS 无关）；
+  - 选中文本（`params.selectionText` 非空）：复制 / 全选；
+  - 其余空白处：仅全选；
+  - 链接（`params.linkURL` 非空）：复制链接地址（主进程 `clipboard.writeText`）+ 打开链接（`shell.openExternal`）。
+- `popup({ window: win })` 显式传窗口（多窗口共存时必要）。
+- 要点：`context-menu` 事件覆盖主窗口加载的任意页面（状态壳、引擎 UI），一处挂载全窗口生效；菜单项用 `role` 而非手动发 IPC，粘贴/复制对引擎 UI 与壳页面都可靠。若未来引擎 UI 自带自定义右键菜单（DOM 层），两者会叠加——届时可在此事件里判断后决定是否接管。
+
 ---
 
 ## 三、打包
