@@ -47,7 +47,7 @@ pnpm dev                  # 编译并启动（引擎从 resources/engine 或 DSH
 ```sh
 pnpm run release-all                # 一键全流程：bump+tag+push → 等 CI → 本机构建 →
                                     # 发布（Intel 机自动合并 x64）→ 下载产物 → GitCode 镜像
-                                    # 可选：--minor / --major / --version x.y.z / --skip-build / --skip-mirror / --dry-run
+                                    # 可选：--minor / --major / --version x.y.z / --skip-build / --skip-mirror / --skip <平台> / --dry-run
 ```
 
 分步（需要手动盯 CI 或跳过某步时用）：
@@ -59,8 +59,9 @@ pnpm run release                    # 唯一可显式带版本号的命令（可
 pnpm run publish-release         # 默认：只把 CI 建的 draft release 发布为公开（任何机器）
 pnpm build && pnpm run publish-release --with-x64  # Intel Mac 本机：补发 x64 包并合并进 release，再发布
 
-pnpm run download-release           # 用 gh CLI 下载 GitHub release 全平台产物（完整镜像前置；本机已有 x64 产物时自动复用）
-pnpm run sync-domestic --dir release/mirror   # 上传到 GitCode 国内镜像
+pnpm run download-release           # 用 gh CLI 下载 GitHub release 全平台产物（完整镜像前置）；
+                                    # 本机打过包的平台用 --skip 复用本地副本（如 --skip mac-x64），不传则全量下载
+pnpm run sync-domestic --dir release/mirror   # 上传到 GitCode 国内镜像（自动跳过旧版本残留）
 ```
 
 版本号唯一来源是 `package.json` 的 `version`（tag 恒为 `v<version>`）：除 `release` / `release-all` 可用 `--version` 显式指定外，其余命令都不带版本参数，自动读取。**完整发布流程、命令详解、签名/公证、GitCode 镜像、环境坑见 [`docs/发布总结.md`](docs/发布总结.md)**。
