@@ -6,6 +6,15 @@
  * attachments anonymously over a CDN and electron-updater's generic provider
  * resolves `latest-*.yml` from the stable `releases/download/latest/` base.
  *
+ * KNOWN LIMITATION (worked around in main/index.ts applyFeedRequestHeaders):
+ * GitCode's `releases/download/<tag>/<file>` endpoint 404s any URL carrying a
+ * query string, but electron-updater's GenericProvider appends
+ * `?noCache=<random>` to the channel yml request. The feed below therefore
+ * only works because the app sets `autoUpdater.requestHeaders` with a
+ * `private-token` for the GitCode source, which makes electron-updater skip
+ * the cache-buster (AppUpdater.isAddNoCacheQuery). Keep that pairing in mind
+ * when touching either side.
+ *
  * The feed list is baked in on purpose: adding a mirror is a code change plus
  * a sync-domestic target change, versioned together. Keep the GitCode
  * owner/repo in sync with .env (GITCODE_OWNER/GITCODE_REPO) and the GitHub

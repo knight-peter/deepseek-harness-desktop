@@ -73,10 +73,26 @@ function engineDir(): string {
 /** Engine child environment: Electron-as-node plus the inspect override. */
 function engineNodeEnv(): Record<string, string> {
   const env: Record<string, string> = { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+  const nodeOptions: string[] = []
   const inspectPort = settings.get().inspectPort
   if (inspectPort !== undefined && inspectPort > 0) {
-    env.NODE_OPTIONS = `--inspect=${inspectPort}`
+    nodeOptions.push(`--inspect=${inspectPort}`)
   }
+  // Mechanism B extension: engine-internal sub-processes (the web-app browser
+  // launcher, the sandbox runner, …) are spawned by the ENGINE itself without
+  // our `--require` argv, so on win32 also carry the windows-hide preload via
+  // NODE_OPTIONS — the one env channel the engine's scrubbedParentEnv keeps
+  // (it only strips credential-shaped and DSH_* names). Only when the path is
+  // space-free: NODE_OPTIONS splits on whitespace, so a "Program Files" path
+  // would break every child. The preload is idempotent, so double-loading
+  // (argv `--require` + NODE_OPTIONS) is harmless.
+  if (process.platform === 'win32') {
+    const preload = windowsHidePreload()
+    if (preload !== '' && !preload.includes(' ')) {
+      nodeOptions.push(`--require=${preload}`)
+    }
+  }
+  if (nodeOptions.length > 0) env.NODE_OPTIONS = nodeOptions.join(' ')
   return env
 }
 
@@ -184,6 +200,28 @@ async function startEngine(): Promise<void> {
 async function restartEngine(): Promise<void> {
   await harness.stop()
   await startEngine()
+}
+
+/**
+ * Open the engine's served web page in the system default browser. The
+ * engine itself is started with `--no-open` (no stray tab at boot), so this
+ * menu action is the explicit user path to hand the URL to the browser.
+ */
+function openWebVersionInBrowser(): void {
+  const state = harness.currentState
+  if (state.kind === 'running') {
+    void shell.openExternal(state.url)
+    return
+  }
+  const win = BrowserWindow.getFocusedWindow() ?? mainWindow
+  if (win === null || win.isDestroyed()) return
+  void dialog.showMessageBox(win, {
+    type: 'info',
+    title: 'dsh-desktop',
+    message: '引擎尚未运行',
+    detail: '请等待引擎启动完成后再打开网页版本。',
+    buttons: ['知道了'],
+  })
 }
 
 /**
@@ -420,6 +458,7 @@ function installMenu(): void {
       submenu: [
         { label: '管理窗口（插件 / 调试 / 设置）', accelerator: 'CmdOrCtrl+,', click: () => createManagerWindow() },
         { label: '重新加载引擎', accelerator: 'CmdOrCtrl+R', click: () => { void restartEngine() } },
+        { label: '打开网页版本', click: () => openWebVersionInBrowser() },
       ],
     },
     {
@@ -497,6 +536,21 @@ function setupAutoUpdater(): void {
 }
 
 /**
+ * GitCode workaround: its `releases/download/<tag>/<file>` endpoint 404s any
+ * URL that carries a query string, while electron-updater's GenericProvider
+ * appends `?noCache=<random>` to the channel yml request (out/util.js
+ * newUrlFromBase — "addRandomQueryToAvoidCaching", GenericProvider-only).
+ * electron-updater skips that cache-buster when `requestHeaders` carries
+ * `authorization` or `private-token` (AppUpdater.isAddNoCacheQuery, see
+ * electron-builder#3021); GitCode ignores the extra header on public downloads
+ * (verified: bare URL + this header → 200). Apply only for the GitCode feed,
+ * clear before any GitHub request.
+ */
+function applyFeedRequestHeaders(sourceId: string): void {
+  autoUpdater.requestHeaders = sourceId === 'gitcode' ? { 'private-token': 'gitcode-mirror' } : null
+}
+
+/**
  * Resolve the update feed (settings choice → probe in auto mode), point
  * electron-updater at it and check. On failure from a non-GitHub source,
  * fall back to GitHub and retry once — a GitCode mirror outage must not hide
@@ -507,6 +561,7 @@ async function checkUpdatesWithFallback(): Promise<void> {
   const choice: UpdateSourceChoice = settings.get().updateSource ?? 'auto'
   const source = await resolveSource(choice)
   console.log(`[updater] feed: ${source.id} (${source.name})`)
+  applyFeedRequestHeaders(source.id)
   autoUpdater.setFeedURL(source.feed)
   try {
     await autoUpdater.checkForUpdates()
@@ -515,6 +570,7 @@ async function checkUpdatesWithFallback(): Promise<void> {
       console.warn(`[updater] ${source.id} 源检查失败（${String((error as Error).message ?? error).slice(0, 120)}），降级 GitHub`)
       const github = sourceById('github')
       if (github !== null) {
+        applyFeedRequestHeaders('github')
         autoUpdater.setFeedURL(github.feed)
         await autoUpdater.checkForUpdates()
         return
