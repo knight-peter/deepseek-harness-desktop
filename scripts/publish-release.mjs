@@ -73,7 +73,7 @@ function parseArgs(argv) {
 
 /**
  * Flip a draft release to public (or report it is already public). Used by
- * both the x64 merge flow and the standalone `--publish-only` mode so that
+ * both the x64 merge flow and the default publish-only mode so that
  * releasing a draft never depends on having an Intel machine to merge x64.
  */
 async function publishDraft(release, tag) {

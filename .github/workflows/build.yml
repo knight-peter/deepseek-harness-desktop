@@ -5,7 +5,7 @@ on:
     # ONLY version tags (v*) trigger the full build+release pipeline. Plain
     # pushes to any branch do NOT run CI — the release flow is: tag → CI
     # builds 3 platforms & creates the GitHub release → local Intel x64
-    # artifacts are merged in via scripts/publish-x64.mjs.
+    # artifacts are merged in via scripts/publish-release.mjs (--with-x64).
     tags: ['v*']
   workflow_dispatch:
 
@@ -25,7 +25,8 @@ jobs:
       matrix:
         # macos-15 is the Apple Silicon (arm64) runner — the only mac build
         # CI ships (Intel x64 packages are built locally and merged into the
-        # release by scripts/publish-x64.mjs; see docs/发布总结.md §4.3).
+        # release by scripts/publish-release.mjs (--with-x64); see
+        # docs/发布总结.md §4.3).
         # Pin the concrete label instead of macos-latest so a future label
         # change cannot silently switch the runner arch.
         os: [macos-15, windows-latest, ubuntu-latest]
@@ -122,5 +123,5 @@ jobs:
   # release was tried and removed — the GitHub (US) runner cannot reach the
   # Huawei OBS upload domain (file.gitcode.com): 180s timeouts, zero progress.
   # The mirror is maintained from the local machine instead (x64 direct upload;
-  # `--from-github` for the full set, requires GitHub-reachable network). See
-  # docs/plans/国内发布与多更新源方案.md.
+  # `download-release` + `sync-domestic --dir` for the full cross-platform set).
+  # See docs/plans/国内发布与多更新源方案.md.

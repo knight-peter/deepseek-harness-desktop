@@ -72,7 +72,8 @@ mac:
     # No `arch` is pinned here on purpose: a build targets the machine it
     # runs on. Local `pnpm build` on an Intel Mac → x64 package; the CI mac
     # runner (macos-15, arm64) → arm64 package. The two arch artifacts are
-    # merged into one GitHub release by scripts/publish-x64.mjs.
+    # merged into one GitHub release by scripts/publish-release.mjs
+    # (--with-x64 mode).
     - dmg
     - zip
 dmg:

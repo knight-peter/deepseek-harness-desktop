@@ -226,6 +226,8 @@ dsh-desktop/
 
 PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engine 都能无系统依赖执行。shim 写失败是非致命的（有系统 pnpm 时照常跑）。
 
+> ⚠️ **跨版本残留坑（v0.1.0–v0.1.2 → v0.1.3+）**：旧版 `cliCommandEnv()` 没有平台分支，在 Windows 上也向 `runtime-bin/` 写了一个**无扩展名的 POSIX `pnpm` 文件**（cmd.exe 无法执行）。v0.1.3 曾以 `existsSync(runtime-bin/pnpm)` 作为创建判定，导致 `pnpm.cmd` 永远不生成 → 升级后「应用引擎更新」仍报 `neither npm nor pnpm is available on PATH`。修复：`runtimeBinEnv()` 改为**每次启动重建垫片**（win32 用 `pnpm.cmd` 判定并先清理旧的无扩展名 `pnpm`），自愈。若用户从旧版升级后仍报此错：退出应用，删除 `runtime-bin/` 目录（Windows `%APPDATA%\dsh-desktop\runtime-bin`；macOS `~/Library/Application Support/dsh-desktop/runtime-bin`）再重开即可。
+
 **list()**：读 profile manifest（`$DSH_HOME/profiles/web/package.json` 的 dependencies + `dsh.profile.bundles`）展示已装插件；`TEMPLATE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']` 是 web profile 模板自带层，标记 template 不可卸载。
 
 **scaffold(name)**：生成模板到 `$DSH_HOME/plugins-local/<name>/`（package.json 声明 `dsh.bundle` patch 层 + `lib/index.js` 函数插件 + `cordis.patch.yml`），随后自动 `file:` 安装（模板逐行讲解见 dsh插件开发.md §3）。

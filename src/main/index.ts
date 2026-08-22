@@ -7,7 +7,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { delimiter, join } from 'node:path'
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, session, shell, type MenuItemConstructorOptions } from 'electron'
@@ -314,24 +314,34 @@ function runtimeBinEnv(): Record<string, string> {
       // non-fatal: pnpm may still run when a system node exists
     }
   }
-  const pnpmLauncher = join(shim, 'pnpm')
   const pnpmEntry = join(process.resourcesPath, 'app.asar', 'node_modules', 'pnpm', 'bin', 'pnpm.cjs')
-  if (!existsSync(pnpmLauncher)) {
+  // Recreate the pnpm shim on every launch (idempotent, self-healing): the
+  // shim bakes in execPath/resourcesPath, so a moved install or a stale file
+  // from an older version must never persist. Windows needs `pnpm.cmd`
+  // (cmd.exe resolves commands via PATHEXT and install-engine.mjs spawns
+  // `pnpm.cmd`); v0.1.0–v0.1.2 wrote an extensionless POSIX `#!/bin/sh` file
+  // named `pnpm` into runtime-bin on every platform — useless to cmd.exe, and
+  // if left behind it previously made the `existsSync(runtime-bin/pnpm)` gate
+  // skip `pnpm.cmd` creation forever (engine updates then fail with
+  // "neither npm nor pnpm is available on PATH"). Clean it up first, then
+  // always write the real shim; cleanup failure must not block the write.
+  const pnpmLauncher = process.platform === 'win32' ? join(shim, 'pnpm.cmd') : join(shim, 'pnpm')
+  if (process.platform === 'win32') {
     try {
-      // install-engine.mjs / plugins spawn `pnpm.cmd` on Windows (PATHEXT is
-      // not applied by spawnSync); a .cmd shim is required there, a plain
-      // shell launcher elsewhere.
-      if (process.platform === 'win32') {
-        const cmdLauncher = join(shim, 'pnpm.cmd')
-        if (!existsSync(cmdLauncher)) {
-          writeFileSync(cmdLauncher, `@"${process.execPath}" "${pnpmEntry}" %*\r\n`)
-        }
-      } else {
-        writeFileSync(pnpmLauncher, `#!/bin/sh\nexec "${process.execPath}" "${pnpmEntry}" "$@"\n`, { mode: 0o755 })
-      }
-    } catch {
-      // non-fatal: plugin install falls back to system pnpm if present
+      rmSync(join(shim, 'pnpm'), { force: true })
+    } catch (error) {
+      console.error(`[shell] runtime-bin legacy pnpm cleanup failed:`, String(error))
     }
+  }
+  try {
+    if (process.platform === 'win32') {
+      writeFileSync(pnpmLauncher, `@"${process.execPath}" "${pnpmEntry}" %*\r\n`)
+    } else {
+      writeFileSync(pnpmLauncher, `#!/bin/sh\nexec "${process.execPath}" "${pnpmEntry}" "$@"\n`, { mode: 0o755 })
+    }
+  } catch (error) {
+    // non-fatal: plugin install / engine update falls back to system pnpm
+    console.error(`[shell] runtime-bin pnpm shim write failed (${pnpmLauncher}):`, String(error))
   }
   env.PATH = [shim, env.PATH ?? ''].join(delimiter)
   return env

@@ -209,7 +209,7 @@ document.getElementById('apply-update-btn').addEventListener('click', async () =
     updateResult.textContent = '引擎更新完成，已重启'
   } else {
     const hint = result.output.includes('neither npm nor pnpm is available on PATH')
-      ? '\n（发布版内置 pnpm 垫片，仍报此错说明运行时未把垫片加入 PATH——请将应用升级到修复版本）'
+      ? '\n（发布版内置 pnpm 垫片。若已是最新版本仍报此错，多为 userData\\runtime-bin 残留旧版垫片：请退出应用后删除该 runtime-bin 目录再重试，应用会自动重建。Windows：%APPDATA%\\dsh-desktop\\runtime-bin；macOS：~/Library/Application Support/dsh-desktop/runtime-bin）'
       : ''
     updateResult.textContent = `引擎更新失败（exit ${String(result.exitCode)}）：\n${result.output.slice(-1200)}${hint}`
   }
