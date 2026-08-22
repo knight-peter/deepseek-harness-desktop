@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Electron shell hosting the DeepSeek Harness web UI (dsh web) under Electron's embedded Node",
   "author": "Knight-peter",
   "license": "MIT",
