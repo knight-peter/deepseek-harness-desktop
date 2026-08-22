@@ -16,6 +16,11 @@ release/
 # resources generated at build time
 resources/node/
 resources/engine/
+resources/engine.new/
+resources/engine.old/
+
+# pnpm store created by install-engine (local cache)
+.pnpm-store/
 
 # logs
 *.log
