@@ -144,6 +144,24 @@ export function buildPatterns(version, skipped) {
   return patterns
 }
 
+/**
+ * The GitHub repo to hand gh as `--repo`, or null to let gh infer it (from
+ * `GH_REPO` env of OWNER/REPO form, else the git remote of the working dir).
+ *
+ * The project's `.env` sets `GH_REPO` to the REPO-NAME ONLY (that is the
+ * shape electron-builder's `${env.GH_REPO}` macro needs), which gh rejects
+ * with "expected the [HOST/]OWNER/REPO format". `release-all` loads .env and
+ * spawns this script with that env inherited, so the gh call must resolve an
+ * explicit OWNER/REPO from `GH_OWNER` + `GH_REPO` whenever both are present.
+ */
+export function ghRepoFlag() {
+  const owner = process.env.GH_OWNER ?? ''
+  const repo = process.env.GH_REPO ?? ''
+  if (repo === '') return ''
+  const qualified = repo.includes('/') ? repo : owner === '' ? '' : `${owner}/${repo}`
+  return qualified === '' ? '' : `--repo ${JSON.stringify(qualified)} `
+}
+
 async function main() {
   const { tag: tagArg, dir, skip } = parseArgs(process.argv.slice(2))
 
@@ -188,7 +206,7 @@ async function main() {
   }
   console.log(`download-release: downloading ${tag} (via gh CLI) → ${dir}`)
   sh(
-    `gh release download ${tag} --dir ${JSON.stringify(dir)} --clobber ` +
+    `gh release download ${ghRepoFlag()}${tag} --dir ${JSON.stringify(dir)} --clobber ` +
       patterns.map((p) => `--pattern ${JSON.stringify(p)}`).join(' '),
   )
 
