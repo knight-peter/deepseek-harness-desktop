@@ -172,13 +172,22 @@ async function uploadFile(fileName, data) {
 // ── local mode helpers ──────────────────────────────────────────────────────
 
 /** Collect release artifacts already present in a directory (manual download
- * from the GitHub release page or a mirror), uploaded under their own names. */
-function loadDirArtifacts(dir) {
+ * from the GitHub release page or a mirror), uploaded under their own names.
+ * Stale `dsh-desktop-*` files of older releases (e.g. the previous version's
+ * Setup-0.1.3.exe lingering in the dir) are skipped — the `latest` mirror
+ * must never carry anything but the current version. */
+export function loadDirArtifacts(dir) {
+  const version = (packageTag() ?? '').replace(/^v/, '')
+  const currentRe = new RegExp(`-${version.replace(/\./g, '\\.')}([.-])`)
   const keep = (name) => /\.(dmg|zip|exe|AppImage)$/.test(name) || /^latest(-mac|-linux)?\.yml$/.test(name)
   const artifacts = []
   const ymls = new Map()
   for (const name of readdirSync(dir)) {
     if (!keep(name)) continue
+    if (/^dsh-desktop-/.test(name) && !currentRe.test(name)) {
+      console.warn(`sync-domestic: skipping stale ${name} (current version ${version})`)
+      continue
+    }
     const data = readFileSync(join(dir, name))
     if (/^latest.*\.yml$/.test(name)) {
       ymls.set(name, data.toString('utf8'))
@@ -358,7 +367,9 @@ async function main() {
   console.log('sync-domestic: done')
 }
 
-void main().catch((error) => {
-  console.error(`sync-domestic: ${String(error.message ?? error)}`)
-  process.exit(1)
-})
+if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+  void main().catch((error) => {
+    console.error(`sync-domestic: ${String(error.message ?? error)}`)
+    process.exit(1)
+  })
+}

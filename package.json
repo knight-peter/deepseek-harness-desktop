@@ -23,7 +23,8 @@
     "publish-release": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/publish-release.mjs",
     "sync-domestic": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/sync-domestic.mjs",
     "download-release": "node scripts/download-release.mjs",
-    "release": "node scripts/bump-version.mjs"
+    "release": "node scripts/bump-version.mjs",
+    "release-all": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/release-all.mjs"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
