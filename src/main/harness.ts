@@ -160,7 +160,13 @@ export class Harness {
       this.child = null
       if (child.exitCode === null && child.signalCode === null) {
         child.kill('SIGKILL')
-        await once(child, 'exit').catch(() => undefined)
+        // A zombie / unkillable process must not hang stop() forever; give the
+        // SIGKILL a short grace window and move on (the caller may also wrap
+        // stop() in its own timeout).
+        await Promise.race([
+          once(child, 'exit').then(() => undefined),
+          new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+        ])
       }
       this.setState({ kind: 'stopped', code: child.exitCode, signal: child.signalCode })
     }

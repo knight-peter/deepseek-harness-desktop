@@ -19,6 +19,7 @@ import { PluginManager } from './plugins.js'
 import { diagnoseStartupFailure, Tools } from './tools.js'
 import { backupDshHome, installedEngineVersion, latestEngineVersion } from './updater.js'
 import { probeAllSources, resolveSource, sourceById } from './updateSources.js'
+import { appLog, updaterLogger } from './updaterLog.js'
 
 // electron-updater is CommonJS; named ESM imports fail at load time.
 const require = createRequire(import.meta.url)
@@ -505,33 +506,37 @@ function installMenu(): void {
 function setupAutoUpdater(): void {
   if (!app.isPackaged) return // updates only exist in packaged builds
 
+  // Packaged apps have no visible console; file-log every updater step so a
+  // failure (download / Squirrel staging / install) is never silent again.
+  autoUpdater.logger = updaterLogger
+
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
 
   autoUpdater.on('checking-for-update', () => {
-    console.log('[updater] checking for updates')
+    appLog('info', '[updater] checking for updates')
   })
 
   // Terminal events settle the awaiting manual check via `finishManualCheck`
   // (the HUD closes and the result dialog is shown in checkUpdatesWithFeedback);
   // a startup check stays silent because `finishManualCheck` is null then.
   autoUpdater.on('update-available', (info) => {
-    console.log(`[updater] update available: ${info.version}`)
+    appLog('info', `[updater] update available: ${info.version}`)
     finishManualCheck?.({ ok: true, outcome: { kind: 'available', version: info.version } })
   })
 
   autoUpdater.on('update-not-available', () => {
-    console.log('[updater] no update available')
+    appLog('info', '[updater] no update available')
     finishManualCheck?.({ ok: true, outcome: { kind: 'not-available' } })
   })
 
   autoUpdater.on('error', (error) => {
-    console.error('[updater] error:', error)
+    appLog('error', `[updater] error: ${String(error instanceof Error ? error.stack ?? error : error)}`)
     finishManualCheck?.({ ok: false, error: error instanceof Error ? error : new Error(String(error)) })
   })
 
   autoUpdater.on('update-downloaded', (info) => {
-    console.log(`[updater] update downloaded: ${info.version}`)
+    appLog('info', `[updater] update downloaded: ${info.version}`)
     const win = BrowserWindow.getFocusedWindow() ?? mainWindow
     if (win === null || win.isDestroyed()) return
     void dialog
@@ -546,8 +551,21 @@ function setupAutoUpdater(): void {
       })
       .then(({ response }) => {
         if (response === 0) {
-          // quit → before-quit stops the engine → autoInstallOnAppQuit installs.
-          app.quit()
+          // 立即重启：调用 quitAndInstall 而不是裸 app.quit()。macOS 上它让
+          // Squirrel.Mac 完成安装并自动重启（裸 quit 依赖下载时的暂存，静默
+          // 失败就是它来的）；Windows/Linux 上它先跑 NSIS/AppImage 安装器再
+          // 退出。before-quit 会先停引擎；「稍后」路径由 autoInstallOnAppQuit
+          // 在下次退出时兜底。
+          appLog('info', '[updater] 用户选择立即重启 → autoUpdater.quitAndInstall()')
+          autoUpdater.quitAndInstall()
+          // macOS 上若 Squirrel.Mac 暂存失败（签名校验不过等），quitAndInstall
+          // 会挂起等待原生 update-downloaded 事件而永不退出；10s 后兜底退出
+          // （此时不安装，但「立即重启」绝不会点了没反应——失败原因见
+          // <userData>/updater.log）。
+          setTimeout(() => {
+            appLog('warn', '[updater] quitAndInstall 10s 内未触发退出，兜底 app.quit()（Squirrel 暂存可能失败）')
+            app.quit()
+          }, 10_000)
         }
       })
   })
@@ -777,12 +795,48 @@ async function boot(): Promise<void> {
   }
 }
 
+/** How long the app waits for the engine to stop before quitting anyway (ms). */
+const QUIT_ENGINE_STOP_TIMEOUT_MS = 10_000
+
+/**
+ * Race `promise` against a hard timeout; the timer wins on expiry. Used so a
+ * hung engine teardown can never wedge the app's quit / update-install path
+ * (a quit that never completes is a "点击重启后毫无反应" for the user).
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} 超过 ${ms}ms 未完成`)), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
+
 app.on('before-quit', (event) => {
   if (quitting) return
   event.preventDefault()
   quitting = true
+  appLog('info', '[quit] 退出请求：先停止引擎')
   clipboardWatcher.stop()
-  void harness.stop().finally(() => app.quit())
+  void (async () => {
+    try {
+      await withTimeout(harness.stop(), QUIT_ENGINE_STOP_TIMEOUT_MS, 'harness.stop')
+      appLog('info', '[quit] 引擎已停止，继续退出')
+    } catch (error) {
+      // A stuck engine must not block quit / update-install forever: quit
+      // anyway. harness.stop() already SIGTERM'd the engine child; a residual
+      // process would be an orphan the OS reclaims, logged here for forensics.
+      appLog('error', `[quit] 引擎停止未在 ${QUIT_ENGINE_STOP_TIMEOUT_MS}ms 内完成（${String(error)}），仍继续退出`)
+    }
+    app.quit()
+  })()
 })
 process.on('SIGINT', () => app.quit())
 process.on('SIGTERM', () => app.quit())

@@ -94,8 +94,21 @@ jobs:
           # renders it as '') crashes with "<projectDir> not a file". Only
           # expose the signing/notarization vars when a real secret exists;
           # unset them otherwise so cert lookup is skipped cleanly.
+          # macOS 优先用路线一自签名证书 secret（DSH_MAC_*），兼容旧 CSC_LINK。
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            export CSC_LINK="${DSH_MAC_CSC_LINK:-$CSC_LINK}"
+            export CSC_KEY_PASSWORD="${DSH_MAC_CSC_KEY_PASSWORD:-$CSC_KEY_PASSWORD}"
+          fi
           if [ -z "$CSC_LINK" ]; then unset CSC_LINK CSC_KEY_PASSWORD; fi
           if [ -z "$APPLE_ID" ]; then unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; fi
+          # 路线一自签名证书需要先被 macOS 信任：electron-builder 的身份发现走
+          # `security find-identity -v`，不受信任的自签名证书会被过滤（0 valid
+          # identities）→ 构建变成未签名。信任为根（trustRoot）即可。
+          if [ "$RUNNER_OS" = "macOS" ] && [ -n "$DSH_MAC_CSC_LINK" ]; then
+            echo "$DSH_MAC_CSC_LINK" | base64 -d > "$RUNNER_TEMP/dsh-release.p12"
+            openssl pkcs12 -in "$RUNNER_TEMP/dsh-release.p12" -passin "pass:$DSH_MAC_CSC_KEY_PASSWORD" -nokeys -clcerts -out "$RUNNER_TEMP/dsh-release.crt"
+            security add-trusted-cert -d -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$RUNNER_TEMP/dsh-release.crt"
+          fi
           pnpm run build ${{ startsWith(github.ref, 'refs/tags/') && '--publish onTagOrDraft' || '--publish never' }}
         env:
           # publish.owner/repo in electron-builder.yml use ${env.GH_OWNER} /
@@ -104,8 +117,19 @@ jobs:
           # `repository`.
           GH_OWNER: knight-peter
           GH_REPO: deepseek-harness-desktop
-          # macOS signing/notarization creds; the shell unset above removes
-          # them when the secrets are absent.
+          # 签名身份由 electron-builder.config.cjs 动态计算：CSC_NAME 非空 →
+          # 证书签名；否则 ad-hoc（identity='-'，与旧行为一致）。
+          # 路线一自签名证书（mac 专用，避免 mac 证书被 Windows signtool 误用）。
+          # 生成：scripts/make-self-signed-cert.mjs；把 p12 内容 base64 设为
+          # DSH_MAC_CSC_LINK，导出密码设为 DSH_MAC_CSC_KEY_PASSWORD。
+          # 必须与本地 x64 构建用同一个 .p12，Squirrel 才接受跨机器更新。
+          DSH_MAC_CSC_LINK: ${{ secrets.DSH_MAC_CSC_LINK }}
+          DSH_MAC_CSC_KEY_PASSWORD: ${{ secrets.DSH_MAC_CSC_KEY_PASSWORD }}
+          # 自动发现被共享 .env 关闭（CSC_IDENTITY_AUTO_DISCOVERY=false），
+          # 证书身份靠 CSC_NAME 显式指定；无证书时为空字符串（不参与查找，
+          # electron-builder.config.cjs 自动回退 ad-hoc）。
+          CSC_NAME: ${{ secrets.DSH_MAC_CSC_LINK != '' && 'dsh-desktop-release' || '' }}
+          # 兼容旧的统一 CSC_LINK secret（Windows 代码签名证书走这里）。
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}

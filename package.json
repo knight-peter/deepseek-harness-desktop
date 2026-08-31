@@ -14,7 +14,7 @@
   "scripts": {
     "dev": "pnpm run compile && electron .",
     "compile": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
-    "build": "pnpm run compile && node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local node_modules/electron-builder/out/cli/cli.js",
+    "build": "pnpm run compile && node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local node_modules/electron-builder/out/cli/cli.js --config electron-builder.config.cjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src",
     "install-engine": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/install-engine.mjs",
@@ -24,6 +24,7 @@
     "publish-release": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/publish-release.mjs",
     "sync-domestic": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/sync-domestic.mjs",
     "download-release": "node scripts/download-release.mjs",
+    "sign-cert": "node scripts/make-self-signed-cert.mjs",
     "release": "node scripts/bump-version.mjs",
     "release-all": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/release-all.mjs"
   },

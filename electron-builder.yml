@@ -39,21 +39,16 @@ npmRebuild: false
 mac:
   category: public.app-category.developer-tools
   icon: build/icon.icns
-  # Ad-hoc signing (`identity: "-"`, electron-builder 26 native support):
-  # without a Developer ID certificate the app would be completely unsigned,
-  # and Gatekeeper then reports a dead-end "app is damaged" dialog on
-  # downloaded copies. An ad-hoc signature downgrades that to the standard
-  # "unidentified developer" flow (right-click → Open to allow), which is the
-  # best free option until a Developer ID cert is configured.
-  #
-  # hardenedRuntime stays on (below); the default entitlements template ships
-  # com.apple.security.cs.disable-library-validation (+ allow-jit), so the
-  # ad-hoc build launches fine despite library validation.
-  #
-  # Switching to real signing later: REMOVE this line once CSC_LINK /
-  # CSC_KEY_PASSWORD are configured (CI secrets or .env.local) — a hardcoded
-  # "-" would otherwise win over the real certificate.
-  identity: "-"
+  # 签名身份由 electron-builder.config.cjs 动态计算（electron-builder 不对
+  # mac.identity 做 ${env.X} 宏展开，静态 yml 无法条件化）：
+  #   - 配置了证书（CSC_NAME 非空）→ identity 空字符串，证书身份由 CSC_NAME
+  #     显式指定（配合 CSC_LINK/CSC_KEY_PASSWORD）。
+  #   - 未配置证书 → identity '-'（ad-hoc，与引入签名前的行为一致）。
+  # 路线一自签名证书：`pnpm run sign-cert` 一键生成 p12 + 写入 .env.local +
+  # 信任证书；CI 用 secret DSH_MAC_CSC_LINK / DSH_MAC_CSC_KEY_PASSWORD 注入
+  # （.github/workflows/build.yml 有信任步骤）。Squirrel.Mac 校验更新包与已装
+  # 应用必须是同一签名身份，所以**每个版本都用同一个 .p12 签名**。
+  # 详见 README「macOS 签名（路线一：自签名证书，免费）」。
   # Notarization requires the hardened runtime; it is on by default for
   # non-MAS builds, but we pin it explicitly so the intent is visible.
   hardenedRuntime: true
