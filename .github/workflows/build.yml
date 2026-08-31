@@ -105,7 +105,13 @@ jobs:
           # `security find-identity -v`，不受信任的自签名证书会被过滤（0 valid
           # identities）→ 构建变成未签名。信任为根（trustRoot）即可。
           if [ "$RUNNER_OS" = "macOS" ] && [ -n "$DSH_MAC_CSC_LINK" ]; then
-            echo "$DSH_MAC_CSC_LINK" | base64 -d > "$RUNNER_TEMP/dsh-release.p12"
+            # secret 粘贴时可能带入换行/空格（多行 base64 合法，但须先清空白
+            # 再解码；引号等非 base64 字符则直接报错并给出修复指引）。
+            printf '%s' "$DSH_MAC_CSC_LINK" | tr -d '[:space:]' > "$RUNNER_TEMP/dsh-release.b64"
+            if ! base64 -d -i "$RUNNER_TEMP/dsh-release.b64" > "$RUNNER_TEMP/dsh-release.p12" 2>/dev/null; then
+              echo "::error::DSH_MAC_CSC_LINK 不是合法 base64 —— 请重新设置该 secret：值必须是 \`base64 -i dsh-release.p12 | tr -d '\\n'\` 的完整输出，单行、无引号、无空格"
+              exit 1
+            fi
             openssl pkcs12 -in "$RUNNER_TEMP/dsh-release.p12" -passin "pass:$DSH_MAC_CSC_KEY_PASSWORD" -nokeys -clcerts -out "$RUNNER_TEMP/dsh-release.crt"
             security add-trusted-cert -d -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$RUNNER_TEMP/dsh-release.crt"
           fi
