@@ -9,7 +9,7 @@ overrides:
 
 patchedDependencies:
   '@electron/osx-sign@1.3.3':
-    hash: 6438c68471794d351db456282d0b209e8af0cb199103bf8b9c07227253d9b34b
+    hash: cab4b53e02d6bce918665923cd21c3072b477ea6a9a1eded9dcc07b91982957d
     path: patches/@electron__osx-sign@1.3.3.patch
 
 importers:
@@ -1400,7 +1400,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@electron/osx-sign@1.3.3(patch_hash=6438c68471794d351db456282d0b209e8af0cb199103bf8b9c07227253d9b34b)':
+  '@electron/osx-sign@1.3.3(patch_hash=cab4b53e02d6bce918665923cd21c3072b477ea6a9a1eded9dcc07b91982957d)':
     dependencies:
       compare-version: 0.1.2
       debug: 4.4.3
@@ -1731,7 +1731,7 @@ snapshots:
       '@electron/fuses': 1.8.0
       '@electron/get': 5.1.0
       '@electron/notarize': 2.5.0
-      '@electron/osx-sign': 1.3.3(patch_hash=6438c68471794d351db456282d0b209e8af0cb199103bf8b9c07227253d9b34b)
+      '@electron/osx-sign': 1.3.3(patch_hash=cab4b53e02d6bce918665923cd21c3072b477ea6a9a1eded9dcc07b91982957d)
       '@electron/rebuild': 4.2.0
       '@electron/universal': 2.0.3
       '@malept/flatpak-bundler': 0.4.0

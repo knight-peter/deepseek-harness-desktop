@@ -1,3 +1,20 @@
+diff --git a/dist/cjs/sign.js b/dist/cjs/sign.js
+index 080036e410e2e4b0445f841416b3d5966915c66a..09e6713044679bbaea78e8b8cbf997901ca1e1da 100644
+--- a/dist/cjs/sign.js
++++ b/dist/cjs/sign.js
+@@ -230,7 +230,11 @@ async function signApplication(opts, identity) {
+             perFileArgs.push('--timestamp=' + perFileOptions.timestamp);
+         }
+         else {
+-            perFileArgs.push('--timestamp');
++            // Patch: 默认不再带裸 --timestamp。CI（GitHub Actions macOS
++            // runner）上 osx-sign 对 app 内每个二进制逐个 codesign
++            // --timestamp，34k 个文件逐一请求 timestamp.apple.com 被限流，
++            // 真证书签名从几分钟拖到 2 小时+。route-1 自签名 + 不公证场景
++            // 时间戳非必需；将来上 Developer ID + 公证需恢复此参数。
+         }
+         let optionsArguments = [];
+         if (perFileOptions.signatureFlags) {
 diff --git a/dist/cjs/util.js b/dist/cjs/util.js
 index 77e64b56872bc65bcb0f60ecfbec84eb3da02c6f..9b9228f0f52700e7df90c99deac8376a14833a40 100644
 --- a/dist/cjs/util.js
