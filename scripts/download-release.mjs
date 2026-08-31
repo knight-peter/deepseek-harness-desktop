@@ -9,6 +9,15 @@
  * is the most reliable CLI path when the network cooperates; the mirror upload
  * itself stays fully automatic (sync-domestic).
  *
+ * Transport strategy (cross-platform): the `gh` CLI is used when it is
+ * installed AND authenticated (preferred). Otherwise the script falls back to
+ * GH_TOKEN + GitHub REST API + `curl` with resume (`-C -`) and retry — every
+ * supported OS ships curl (macOS built-in, Linux ~always, Windows 10+ ships
+ * curl.exe). The fallback needs only the two release env vars, no interactive
+ * `gh auth login`, so the mirror step runs on any machine with git+node+curl.
+ * Optional `DSH_MIRROR_PROXY` forces a proxy (`-x`); without it curl honors
+ * the standard HTTPS_PROXY/HTTP_PROXY env vars.
+ *
  * Only the artifacts sync-domestic can consume are downloaded (dmg/zip/exe/
  * AppImage/latest-*.yml) — blockmaps are skipped.
  *
@@ -35,12 +44,12 @@
  * (the single source of truth after `pnpm run release` — the `v<version>`
  * git tag matches it). No version argument is needed in the normal flow;
  * `--tag <vX.Y.Z>` only exists as an override for exceptional cases.
- * Requires: gh CLI installed and authenticated (`brew install gh` + `gh auth
- * login`).
+ * Requires: gh CLI installed+authenticated (gh path), or GH_TOKEN +
+ * GH_OWNER/GH_REPO (fallback path; curl for downloads).
  * @module dsh-desktop/download-release
  */
 
-import { execSync } from 'node:child_process'
+import { execSync, spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -54,7 +63,7 @@ function fail(message) {
   process.exit(1)
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = { tag: null, dir: DEFAULT_DIR, skip: [] }
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--tag') args.tag = argv[++i] ?? null
@@ -155,41 +164,109 @@ export function buildPatterns(version, skipped) {
  * explicit OWNER/REPO from `GH_OWNER` + `GH_REPO` whenever both are present.
  */
 export function ghRepoFlag() {
+  const qualified = repoQualified()
+  return qualified === null ? '' : `--repo ${JSON.stringify(qualified)} `
+}
+
+/** `owner/repo` for the GitHub API, or null when GH_OWNER/GH_REPO are missing. */
+function repoQualified() {
   const owner = process.env.GH_OWNER ?? ''
   const repo = process.env.GH_REPO ?? ''
-  if (repo === '') return ''
-  const qualified = repo.includes('/') ? repo : owner === '' ? '' : `${owner}/${repo}`
-  return qualified === '' ? '' : `--repo ${JSON.stringify(qualified)} `
+  if (repo === '') return null
+  return repo.includes('/') ? repo : owner === '' ? null : `${owner}/${repo}`
+}
+
+/**
+ * Whether the `gh` CLI is usable: installed AND authenticated. A stale stored
+ * credential (hosts.yml) can fail `gh auth status` even though GH_TOKEN is
+ * valid — the release flow always carries GH_TOKEN, so retry once with an
+ * isolated config dir where gh uses the env token only.
+ */
+export function ghUsable() {
+  try {
+    execSync('gh --version', { stdio: 'ignore' })
+  } catch {
+    return false
+  }
+  try {
+    execSync('gh auth status', { stdio: 'ignore' })
+    return true
+  } catch {
+    if (process.env.GH_TOKEN === undefined || process.env.GH_TOKEN === '') return false
+    const iso = join(ROOT, 'release', '.ghcfg')
+    mkdirSync(iso, { recursive: true })
+    process.env.GH_CONFIG_DIR = iso
+    try {
+      execSync('gh auth status', { stdio: 'ignore' })
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+/** Convert a gh `--pattern` glob into a RegExp (patterns never use `**`/`[]`). */
+function globToRegExp(pattern) {
+  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`^${escaped.replace(/\*/g, '.*')}$`)
+}
+
+/**
+ * GH_TOKEN + GitHub REST API + curl fallback (gh-free, cross-platform).
+ * Lists the release assets via the API, downloads each with curl using
+ * resume (`-C -`), retries and a size check against the asset metadata.
+ */
+async function downloadViaToken(dir, tag, version, patterns) {
+  const qualified = repoQualified()
+  if (qualified === null) fail('GH_TOKEN 回退路径需要 GH_OWNER + GH_REPO（或 GH_REPO=owner/repo）环境变量')
+  const token = process.env.GH_TOKEN
+  if (token === undefined || token === '') fail('GH_TOKEN 未设置 —— 无法走 token 回退路径')
+  const matchers = patterns.map(globToRegExp)
+  const curlArgs = ['-sL', '-C', '-', '--retry', '3', '--retry-delay', '3', '--retry-all-errors', '--max-time', '900']
+  const proxy = process.env.DSH_MIRROR_PROXY
+  if (proxy !== undefined && proxy !== '') curlArgs.push('-x', proxy)
+
+  const response = await fetch(`https://api.github.com/repos/${qualified}/releases/tags/${tag}`, {
+    headers: { Authorization: `Bearer ${token}`, 'User-Agent': 'dsh-download-release' },
+  })
+  const release = await response.json()
+  if (!Array.isArray(release.assets)) {
+    fail(`GitHub API 未返回 release ${tag}（HTTP ${response.status}）——请检查 GH_TOKEN / GH_OWNER / GH_REPO`)
+  }
+  const assets = release.assets.filter((asset) => matchers.some((m) => m.test(asset.name)))
+  if (assets.length === 0) fail(`release ${tag} 没有可同步的产物（已按 --skip 过滤）`)
+
+  for (const asset of assets) {
+    const dest = join(dir, asset.name)
+    let got = (() => { try { return statSync(dest).size } catch { return 0 } })()
+    if (got === asset.size) {
+      console.log(`download-release: ${asset.name} already complete (${asset.size} bytes), skip`)
+      continue
+    }
+    console.log(`download-release: downloading ${asset.name} (${(asset.size / 1048576).toFixed(0)} MB)${got > 0 ? `, resuming at ${got}` : ''} (GH_TOKEN + curl)`)
+    let attempts = 0
+    while (got !== asset.size && attempts < 6) {
+      attempts++
+      const result = spawnSync('curl', [...curlArgs, '-o', dest, asset.browser_download_url], {
+        encoding: 'utf8',
+        timeout: 950_000,
+      })
+      try {
+        got = statSync(dest).size
+      } catch {
+        got = 0
+      }
+      if (got !== asset.size) {
+        console.log(`download-release:   attempt ${attempts} incomplete (${got}/${asset.size} bytes, curl status ${String(result.status)})`)
+      }
+    }
+    if (got !== asset.size) fail(`下载失败：${asset.name}（${got}/${asset.size} 字节）`)
+    console.log(`download-release:   done ${(asset.size / 1048576).toFixed(0)} MB`)
+  }
 }
 
 async function main() {
   const { tag: tagArg, dir, skip } = parseArgs(process.argv.slice(2))
-
-  try {
-    execSync('gh --version', { stdio: 'ignore' })
-  } catch {
-    fail('未找到 gh CLI —— 先安装：brew install gh，然后 gh auth login')
-  }
-  try {
-    execSync('gh auth status', { stdio: 'ignore' })
-  } catch {
-    // gh auth status exits non-zero when a stale/invalid stored credential
-    // exists (hosts.yml) even though GH_TOKEN is valid — the release flow
-    // always carries GH_TOKEN, so fall back to an isolated config dir where
-    // gh uses the env token only.
-    if (process.env.GH_TOKEN !== undefined && process.env.GH_TOKEN !== '') {
-      const iso = join(ROOT, 'release', '.ghcfg')
-      mkdirSync(iso, { recursive: true })
-      process.env.GH_CONFIG_DIR = iso
-      try {
-        execSync('gh auth status', { stdio: 'ignore' })
-      } catch {
-        fail('gh 认证失败（隔离配置下也不可用）——请检查 GH_TOKEN 是否有效')
-      }
-    } else {
-      fail('gh 未登录 —— 先运行 gh auth login，或设置 GH_TOKEN')
-    }
-  }
 
   const tag = tagArg ?? packageTag()
   if (tag === null) fail('cannot read version from package.json; pass --tag <vX.Y.Z> to override')
@@ -204,11 +281,21 @@ async function main() {
   if (skipped.size > 0) {
     console.log(`download-release: skipping download of: ${[...skipped].join(', ')}`)
   }
-  console.log(`download-release: downloading ${tag} (via gh CLI) → ${dir}`)
-  sh(
-    `gh release download ${ghRepoFlag()}${tag} --dir ${JSON.stringify(dir)} --clobber ` +
-      patterns.map((p) => `--pattern ${JSON.stringify(p)}`).join(' '),
-  )
+
+  // Transport: gh CLI preferred; GH_TOKEN + REST API + curl as the
+  // cross-platform fallback (no interactive `gh auth login` needed).
+  if (ghUsable()) {
+    console.log(`download-release: downloading ${tag} (via gh CLI) → ${dir}`)
+    sh(
+      `gh release download ${ghRepoFlag()}${tag} --dir ${JSON.stringify(dir)} --clobber ` +
+        patterns.map((p) => `--pattern ${JSON.stringify(p)}`).join(' '),
+    )
+  } else if (process.env.GH_TOKEN !== undefined && process.env.GH_TOKEN !== '') {
+    console.log(`download-release: gh CLI 不可用，改用 GH_TOKEN + GitHub API + curl → ${dir}`)
+    await downloadViaToken(dir, tag, version, patterns)
+  } else {
+    fail('既没有可用的 gh CLI（未安装/未登录），也没有 GH_TOKEN —— 二选一：安装并 gh auth login，或设置 GH_TOKEN')
+  }
 
   const kept = cleanStaleArtifacts(dir, version)
 

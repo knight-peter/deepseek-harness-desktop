@@ -1,9 +1,11 @@
 # dsh-desktop Electron 基座应用开发
 
-> 面向接手维护本仓库的开发者——尤其是**从纯前端转来做 Electron 桌面壳**的同学。
+> 面向接手维护本仓库的开发者——尤其是**从纯前端转来做 Electron 桌面壳**的同学（人与 AI 代理共用）。
 > 本文讲「壳」本身：Electron 基础、窗口与进程、引擎托管、打包、更新。dsh 引擎与插件开发见 **[`dsh插件开发.md`](dsh插件开发.md)**；发版流程见 [`发布总结.md`](发布总结.md)；终端用户文档见 [`使用总结.md`](使用总结.md)。
 >
 > 读完本文你应能回答：这个仓库是怎么运转的、为什么这样设计、改一处代码要跑什么验证、怎么打出一个新包。
+>
+> **快速上手（首次 5 步）**：`mise install && mise use`（工具链）→ `pnpm install`（壳依赖）→ `pnpm run install-engine`（装引擎，约 7 分钟）→ `pnpm dev`（编译 + 启动）。环境准备与命令详解见 §2.7；从零出包顺序见 §3.1；改完必跑：壳代码 `typecheck` + `lint`，引擎/安装逻辑 `smoke`。
 
 ---
 
@@ -110,19 +112,23 @@ dsh-desktop/
 │  │  ├─ plugins.ts              # 插件管理后端：包装 dsh plugin 命令 + 脚手架（§2.5）
 │  │  ├─ tools.ts                # 调试工具：dump-config / diff / patch 校验写入 / 启动失败诊断
 │  │  ├─ config.ts               # settings.json 持久化（原子写）
+│  │  ├─ clipboard.ts            # 剪贴板监听（轮询 + IPC 广播）与引擎 UI 剪贴板权限
 │  │  ├─ updateSources.ts        # 应用更新源（GitHub + GitCode 镜像）与可达性探测（发布总结.md §4.4）
-│  │  └─ updater.ts              # 引擎版本检查 / $DSH_HOME 备份（electron-free）
+│  │  ├─ updater.ts              # 引擎版本检查 / $DSH_HOME 备份（electron-free）
+│  │  └─ updaterLog.ts           # 更新/退出流程诊断日志：打包态控制台不可见 → 写 userData/updater.log
 │  ├─ preload/preload.cjs        # contextBridge：dshDesktop.* API（harness/plugins/tools/settings/updater）
 │  └─ renderer/                  # 纯 JS 页面：index.html 状态壳 + manager.html 管理窗口（三页签）
 ├─ scripts/
 │  ├─ copy-static.mjs            # tsc 后把 preload/renderer 拷进 dist/
 │  ├─ install-engine.mjs         # 引擎安装/升级（§2.4）——本仓库最关键的脚本
+│  ├─ engine-update.mjs          # 引擎一步升级：查最新 → 改 LOCKED（不提交）→ install → rebuild → smoke（§2.4）
 │  ├─ rebuild-engine.mjs         # @electron/rebuild 重编引擎原生模块（§2.3）
 │  ├─ smoke.mjs                  # 引擎冒烟：boot + 健康检查 + 优雅退出（§2.8）
 │  ├─ publish-release.mjs        # 发布 draft 为公开；--with-x64 补发 Intel x64 + 合并（发布总结.md §4.2）
 │  ├─ sync-domestic.mjs          # 同步产物到 GitCode latest release（国内更新镜像，发布总结.md §4.4）
-│  ├─ download-release.mjs       # 用 gh CLI 下载 GitHub release 产物（完整镜像前置，发布总结.md §4.2）
-│  └─ bump-version.mjs           # 发布入口：自动累加版本 + commit + tag + push（发布总结.md §4.2）
+│  ├─ download-release.mjs       # 下载 GitHub release 产物：gh CLI 或 GH_TOKEN + curl 回退（镜像前置，发布总结.md §4.2）
+│  ├─ bump-version.mjs           # 发布入口：自动累加版本 + commit + tag + push（发布总结.md §4.2）
+│  └─ make-self-signed-cert.mjs  # 生成自签名 mac 签名证书并写 .env.local（README「macOS 签名」/发布总结.md §4.5）
 ├─ patches/                       # pnpm patchedDependencies：osx-sign walkAsync 串行化补丁（§1.2/发布总结.md §5）
 ├─ test/fixtures/hello-bundle/   # 插件全流程测试 fixture（§2.8 / dsh插件开发.md §5）
 ├─ resources/                    # 运行期资源：windows-hide.cjs = Windows 隐藏控制台 preload（§2.9）；engine/ 引擎安装区（gitignore）
@@ -134,6 +140,8 @@ dsh-desktop/
 > 为什么这样分？对前端同学来说，可以理解为「业务逻辑层」与「宿主层」分离：业务模块不知道自己在 Electron 里，单元测试时用普通 Node 就能跑；Electron 的特殊性（窗口、app 生命周期、IPC）全部收敛在 `index.ts`。
 
 ### 1.4 架构决策摘要（AD-1 ~ AD-10）
+
+> AD-N = Architecture Decision（架构决策）编号；正文各处 `（AD-N）` 引用均可在下表查到决策与理由，无需去别处找。
 
 | 编号 | 决策 | 理由 / 对应章节 |
 |---|---|---|
@@ -306,7 +314,7 @@ PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engin
 
 **插件全流程（test/fixtures/hello-bundle）**：验证「壳的插件管线没被上游机制变化打破」的最小回归：`dsh plugin --profile web add file:<fixture 绝对路径>` → profile manifest 的 bundles 自动 reconcile（`[dsh-base, dsh-web-app, dsh-hello-bundle]`）→ 重启引擎 → 日志出现 `[hello-bundle] mounted` → `remove` 后 bundles 恢复原状（2026-08-16 实测通过）。fixture 结构即最小 bundle 插件范例（见 dsh插件开发.md §3）。
 
-**CI（.github/workflows/build.yml）**：**CI 只在打 `v*` tag 时触发**（`on.push.tags`，普通 push 不跑）；`workflow_dispatch` 可手动触发。三平台矩阵（macos-15 / windows / ubuntu），每台机器上按序执行：lint → typecheck → install-engine → rebuild-engine → compile → smoke → build（打包）→ 上传 `release/*` 产物（`if-no-files-found: error`）。**正式发布物由 CI 出**；本机 `pnpm build` 仅自测当前平台。tag 推送时 Package 步骤传 `--publish onTagOrDraft`（自动建 release），普通触发传 `--publish never`。mac runner 固定 `macos-15`（arm64，Apple Silicon）——不用 `macos-latest` 是防标签漂移（GitHub 已无 Intel macOS runner，macos-13 退役）。mac 签名/公证 secrets 在 Package 步骤透传——**证书与 Apple 凭据只放 GitHub secrets，不进仓库**；未配置时 CI 产物同样仅 ad-hoc 签名/未公证（打包不失败）。mac 的 Package 步骤还会 `sudo sysctl` 抬高 `kern.maxfilesperproc` + `ulimit`，配合 osx-sign 补丁解决 EMFILE（发布总结.md §5）。Intel x64 包由本机构建后用 `publish-release --with-x64` 合并进同一 release。⚠️ 镜像同步**不在 CI 做**（GitHub runner → 华为云 OBS 上传实测不通），由本机 `sync-domestic` 维护。
+**CI（.github/workflows/build.yml）**：**CI 只在打 `v*` tag 时触发**（`on.push.tags`，普通 push 不跑）；`workflow_dispatch` 可手动触发。三平台矩阵（macos-15 / windows / ubuntu），每台机器上按序执行：lint → typecheck → install-engine → rebuild-engine → compile → smoke → build（打包）→ 上传 `release/*` 产物（`if-no-files-found: error`）。**正式发布物由 CI 出**；本机 `pnpm build` 仅自测当前平台。tag 推送时 Package 步骤传 `--publish onTagOrDraft`（自动建 release），普通触发传 `--publish never`。mac runner 固定 `macos-15`（arm64，Apple Silicon）——不用 `macos-latest` 是防标签漂移（GitHub 已无 Intel macOS runner，macos-13 退役）。mac 签名凭据在 Package 步骤透传：路线一自签名证书走 `DSH_MAC_CSC_LINK`（p12 base64）/`DSH_MAC_CSC_KEY_PASSWORD` secret——mac runner **先信任证书再构建**（`security add-trusted-cert`，否则 `find-identity -v` 过滤掉未信任身份 → 0 valid identities），兼容旧 `CSC_LINK`；未配置时回退 ad-hoc 签名（打包不失败）。Apple 公证凭据（`APPLE_ID` 等）同样只放 GitHub secrets，不进仓库。mac 的 Package 步骤还会 `sudo sysctl` 抬高 `kern.maxfilesperproc` + `ulimit`，配合 osx-sign 补丁解决 EMFILE（发布总结.md §5）。Intel x64 包由本机构建后用 `publish-release --with-x64` 合并进同一 release。⚠️ 镜像同步**不在 CI 做**（GitHub runner → 华为云 OBS 上传实测不通），由本机 `sync-domestic` 维护。
 
 **改了什么跑什么（检查清单）**：
 
@@ -395,7 +403,7 @@ pnpm build                # 7. 打包当前平台、当前架构产物到 releas
 - **壳在 asar 内**：`files: [dist/**/*, scripts/**/*.mjs, package.json]` 把程序、脚本与依赖打进 `app.asar`；内置 `pnpm`（`dependencies`）随之进 asar——打包态「应用引擎更新 / 插件安装」靠 asar 内 pnpm + userData 垫片跑（§2.5/§2.6）。
 - **三平台 target**：mac → dmg + zip（zip 是 electron-updater 增量更新必需）；win → nsis；linux → AppImage。mac 不钉 arch：本机 Intel 出 x64、CI macos-15 出 arm64，双架构合并见发布总结.md §4.3。
 - **publish 配置**：`provider: github` + `${env.GH_OWNER}`/`${env.GH_REPO}`（来自 `.env`，`pnpm build` 用 `--env-file-if-exists` 自动加载）；本地 `pnpm build` 不发布（publish 只在 CI tag 流程发生）。
-- **签名 / 公证**（mac）：当前 ad-hoc 签名（`identity: "-"`）+ 未公证；配了 `CSC_LINK`/`CSC_KEY_PASSWORD`/Apple 凭据后自动升级为正式签名+公证。hardenedRuntime 常开。
+- **签名 / 公证**（mac）：三种模式，`identity` 是 `${env.CSC_IDENTITY}` 宏（每个构建必须定义，否则构建失败）——① 默认（共享 `.env`）：`CSC_IDENTITY=-` → ad-hoc 签名（无证书环境可用，但 Squirrel.Mac 自动更新不可用：每次构建身份随机，更新永远被拒）；② **路线一自签名**：`pnpm run sign-cert` 生成固定 `release/keys/dsh-release.p12` 并写入 `.env.local`（`CSC_IDENTITY=` 空 + `CSC_LINK`/`CSC_KEY_PASSWORD`/`CSC_NAME`）——**每个版本用同一 .p12 签名**，自动更新可用，无需 Apple Developer Program；③ Developer ID 证书同理（付费，可公证）。`CSC_IDENTITY_AUTO_DISCOVERY=false`（共享 .env）关闭钥匙串自动发现（防误用公司证书），身份由 `CSC_NAME` 显式指定。自签名未公证：新 Mac 首次打开需右键 → 打开。hardenedRuntime 常开。
 - **`npmRebuild: false`**：原生模块不交给 electron-builder 重编，改由 `rebuild-engine` 显式管理（§2.3）。
 
 ### 3.4 产物与验证
@@ -424,7 +432,7 @@ pnpm build                # 7. 打包当前平台、当前架构产物到 releas
 - 打包崩溃 `Cannot read properties of undefined (reading 'ReadWrite')` → `@electron/get` 覆盖被移除（pnpm-workspace.yaml 的 overrides，§1.2）。
 - 打包 / `pnpm list` 报 `ERR_SQLITE_ERROR: unable to open database file`（electron-builder 的 node-module-collector 阶段失败）→ **pnpm 全局 store 的 `index.db` 损坏**（本机 `~/Library/pnpm/store/v11/index.db`，异常中断写坏）。修复：备份该文件（`mv index.db index.db.bak`）后 pnpm 自动重建索引。**这不是 electron-builder 的 bug**；`pnpm list --depth 0` 可快速复现判断。
 - mac 打包 `EMFILE: too many open files`（osx-sign 遍历引擎 ~34k 文件）→ 已修：osx-sign walkAsync 串行化（patchedDependencies）+ CI 抬 `kern.maxfilesperproc`/`ulimit`（发布总结.md §5）。
-- mac 产物提示「无法验证开发者」→ ad-hoc 签名正常现象，右键 → 打开；或 `xattr -cr`（一键安装脚本已自动处理，使用总结.md §1）。
+- mac 产物提示「无法验证开发者」→ ad-hoc / 自签名（未公证）正常现象，右键 → 打开；或 `xattr -cr`（一键安装脚本已自动处理，使用总结.md §1）。
 - Intel x64 包 CI 出不了 → 由本机 `pnpm build` 补发，`publish-release --with-x64` 合并（发布总结.md §4.3）。
 
 ### 3.7 与发布流程的衔接
@@ -440,7 +448,7 @@ pnpm build                # 7. 打包当前平台、当前架构产物到 releas
 - **版本号唯一来源**：`package.json` 的 `version`（git tag 恒为 `v<version>`）；正常流程所有命令自动读它，不传版本号。
 - **发布命令**：`pnpm run release`（发版入口）→ CI 自动三平台打包建 draft release → `pnpm run publish-release`（默认仅发布）或 `--with-x64`（Intel 本机补 x64 + 发布）→ `pnpm run download-release` + `pnpm run sync-domestic --dir`（GitCode 镜像）。
 - **架构结论**：构建只在 GitHub Actions（唯一免费 macOS runner）；GitCode 只做镜像/更新源，不做构建；`--from-github` 已废弃（国内拉 GitHub 大文件不可行）。
-- **签名结论**：默认 ad-hoc（`CSC_IDENTITY_AUTO_DISCOVERY=false` + `mac.identity: "-"`），有证书后删 identity 行 + 配 `CSC_LINK`。
+- **签名结论**：`identity: ${env.CSC_IDENTITY}` 宏，三种模式——默认 `CSC_IDENTITY=-` 为 ad-hoc；`pnpm run sign-cert`（路线一自签名，固定 .p12，macOS 自动更新可用；完整说明见 README.md「macOS 签名」）；Developer ID + 公证（付费）。`CSC_IDENTITY_AUTO_DISCOVERY=false` 关闭钥匙串自动发现，身份由 `CSC_NAME` 显式指定。
 
 ---
 
