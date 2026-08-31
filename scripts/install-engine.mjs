@@ -34,9 +34,9 @@ const ENGINE_DIR = process.env.DSH_ENGINE_DIR !== undefined
 const STAGING_DIR = `${ENGINE_DIR}.new`
 const ENGINE_MANIFEST = join(ENGINE_DIR, 'engine.json')
 
-/** Pinned engine packages (registry state verified 2026-08-16). */
+/** Pinned engine packages (registry state verified 2026-08-31). */
 const LOCKED = {
-  '@deepseek-ai/dsh': '0.1.0-rc.6',
+  '@deepseek-ai/dsh': '0.1.1-rc.2',
   '@deepseek-ai/dsh-web-frontend': '0.0.1-rc.5',
 }
 
