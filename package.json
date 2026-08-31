@@ -20,6 +20,7 @@
     "install-engine": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/install-engine.mjs",
     "rebuild-engine": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/rebuild-engine.mjs",
     "smoke": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/smoke.mjs",
+    "engine-update": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/engine-update.mjs",
     "publish-release": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/publish-release.mjs",
     "sync-domestic": "node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local scripts/sync-domestic.mjs",
     "download-release": "node scripts/download-release.mjs",

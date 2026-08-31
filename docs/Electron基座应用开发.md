@@ -206,11 +206,12 @@ dsh-desktop/
 
 **这是本仓库最关键的脚本**。它把锁定版本的引擎装到 `resources/engine`：
 
-- **锁定版本**：文件顶部 `LOCKED` 常量（当前 `@deepseek-ai/dsh@0.1.0-rc.6` + `@deepseek-ai/dsh-web-frontend@0.0.1-rc.5`）。**升级引擎 = 改 LOCKED 后重跑脚本**。两个包必须装在同一棵 node_modules——上游 `dsh-web-app` 用 `require.resolve('@deepseek-ai/dsh-web-frontend/dist/index.html')` 定位前端 dist。
+- **锁定版本**：文件顶部 `LOCKED` 常量（当前 `@deepseek-ai/dsh@0.1.1-rc.2` + `@deepseek-ai/dsh-web-frontend@0.0.1-rc.5`）。**升级引擎 = 改 LOCKED 后重跑脚本**（本地一条命令：`pnpm run engine-update`，见下）。两个包必须装在同一棵 node_modules——上游 `dsh-web-app` 用 `require.resolve('@deepseek-ai/dsh-web-frontend/dist/index.html')` 定位前端 dist。
 - **安装路径**：主路径 npm registry；失败（断网/包缺失）时若有 `DSH_CHECKOUT` 环境变量，走兜底——在 checkout 里 `pnpm install && pnpm build`，对 `apps/cli`、`apps/web` `pnpm pack` 成 tarball 后安装（pnpm pack 会把 workspace: 依赖改写为具体版本）。**包管理器 pnpm 优先、npm 兜底**（2026-08-20 实测：npm 11 在代理/慢 registry 上解析 547 个依赖会长时间无输出地挂起——连接指向 fake-ip 网段 198.18.0.0/15 的代理时尤为明显；pnpm 并发下载 + 快速重试 + store 缓存，同一引擎约 30s 装完）。pnpm 分支会在安装目录写一个空 `pnpm-workspace.yaml`，避免 pnpm 向上找到本仓库的 workspace 配置后把引擎目录当 workspace 成员而空转；并传 `npm_config_strict_dep_builds=false`（pnpm 11 默认 strict=true 会因忽略构建脚本硬失败）。
 - **原子换装**：已存在引擎时先装进 `resources/engine.new` → 校验（dsh bin + 前端 dist/index.html 存在）→ rename 换入（旧引擎先改名 `.old`，换入失败自动回滚）→ 删除 `.old`。**中途失败不破坏旧引擎**。
 - **prebuilds 剪枝**（`pruneForeignPrebuilds`，导出函数可直接测试）：删除 node_modules 里非当前平台的 `prebuilds/<platform>-<arch>/` 目录——node-pty 一家就省 ~58MB win32 二进制（引擎 352M → 294M）。保守策略：只有 `prebuilds/` 根内含当前平台目录时才剪，根级文件不碰。**多架构打包时设 `DSH_KEEP_ALL_PREBUILDS=1` 跳过剪枝**（CI mac 打包 x64+arm64 双架构：runner 是 arm64，若剪枝会剪掉 darwin-x64 的 prebuilds，打出的 Intel 包引擎原生模块缺失）。
 - 安装结果写 `resources/engine/engine.json`（时间、来源、版本），排查「升级没生效」先看它。
+- **一步升级（engine-update.mjs，仅本地）**：`pnpm run engine-update` = 默认查两个包的 npm latest → 改写 `LOCKED`（**不提交**，留在工作区待 review，`git diff scripts/install-engine.mjs`）→ `install-engine` → `rebuild-engine` → `smoke`。参数：`--no-bump` 跳过改 LOCKED、仅按当前版本重装（修复用）；`--version X` 显式钉 `@deepseek-ai/dsh` 版本（前端包仍跟随 latest）；`--dry-run` 只打印将改什么；`--no-smoke` 跳过冒烟。**CI 与打包应用不经过它**：CI 直接跑 install-engine/rebuild-engine/smoke 构建提交的 LOCKED，打包应用的 `updater:apply` 复用同一组脚本且绝不改动 asar 内 LOCKED。
 - 引擎目录在 `.gitignore`（构建期产物），本地和 CI 都先跑 install-engine 再打包（§3.1）。
 
 ### 2.5 插件管理管线（plugins.ts，壳侧）
@@ -227,6 +228,8 @@ dsh-desktop/
 PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engine 都能无系统依赖执行。shim 写失败是非致命的（有系统 pnpm 时照常跑）。
 
 > ⚠️ **跨版本残留坑（v0.1.0–v0.1.2 → v0.1.3+）**：旧版 `cliCommandEnv()` 没有平台分支，在 Windows 上也向 `runtime-bin/` 写了一个**无扩展名的 POSIX `pnpm` 文件**（cmd.exe 无法执行）。v0.1.3 曾以 `existsSync(runtime-bin/pnpm)` 作为创建判定，导致 `pnpm.cmd` 永远不生成 → 升级后「应用引擎更新」仍报 `neither npm nor pnpm is available on PATH`。修复：`runtimeBinEnv()` 改为**每次启动重建垫片**（win32 用 `pnpm.cmd` 判定并先清理旧的无扩展名 `pnpm`），自愈。若用户从旧版升级后仍报此错：退出应用，删除 `runtime-bin/` 目录（Windows `%APPDATA%\dsh-desktop\runtime-bin`；macOS `~/Library/Application Support/dsh-desktop/runtime-bin`）再重开即可。
+
+> ⚠️ **非 ASCII 安装路径坑（v0.1.5 及以前）**：`pnpm.cmd` 由 `writeFileSync` 以 **UTF-8** 写入，而 cmd.exe 按系统 ANSI 代码页（中文系统 = GBK）解析 .cmd——若应用装在含中文等非 ASCII 字符的路径（典型：Windows 用户名为中文，NSIS per-user 装到 `%LOCALAPPDATA%\Programs\dsh-desktop`），垫片内嵌的 exe/asar 路径被错误解码（如 `刘源` → `鍒樻簮`）→ 执行报「系统找不到指定的路径」→ 引擎更新仍报 `neither npm nor pnpm is available on PATH`。**删除 runtime-bin 无济于事**（自愈重写后还是 UTF-8 照样坏）。修复（v0.1.6+）：win32 垫片改为 **UTF-16LE + BOM** 写入（cmd 原生按 Unicode 解析，路径原样保留）。存量用户临时解法：重装应用到纯 ASCII 路径（如 per-machine 装到 `C:\Program Files\dsh-desktop`）。
 
 **list()**：读 profile manifest（`$DSH_HOME/profiles/web/package.json` 的 dependencies + `dsh.profile.bundles`）展示已装插件；`TEMPLATE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']` 是 web profile 模板自带层，标记 template 不可卸载。
 
@@ -276,6 +279,7 @@ PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engin
 | 命令 | 作用 | 何时跑 |
 |---|---|---|
 | `pnpm install` | 装壳依赖 | 首次 / 改依赖 |
+| `pnpm run engine-update` | 一条命令升级引擎：查最新 → 改 `LOCKED`（不提交）→ install → rebuild → smoke（`--no-bump` 仅重装、`--version X` 显式版本、`--dry-run` 预览、`--no-smoke` 跳过冒烟） | 升级引擎版本（本地，§2.4） |
 | `pnpm run install-engine` | 装锁定版本引擎到 resources/engine（registry 主路径，首次约 7 分钟） | 首次、升级引擎、CI |
 | `pnpm run rebuild-engine` | 重编引擎原生模块 | 换 Electron 版本后 |
 | `pnpm run smoke` | 引擎冒烟（Electron-as-Node boot + 健康检查 + 优雅退出） | 动过引擎/安装逻辑后 |
@@ -309,7 +313,7 @@ PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engin
 | 改动 | 必跑 |
 |---|---|
 | main 逻辑（harness/plugins/tools/config/updater） | `typecheck` + `lint` + `dev` 手测 |
-| 引擎安装/升级逻辑、`LOCKED` 版本 | `install-engine` + `smoke`（再打包产物实机 boot） |
+| 引擎安装/升级逻辑、`LOCKED` 版本 | `engine-update`（或 `install-engine` + `smoke`；再打包产物实机 boot） |
 | 打包配置（electron-builder.yml） | `build` + 打开产物验证（`.app` 直跑：`release/mac/dsh-desktop.app/Contents/MacOS/dsh-desktop`） |
 | preload / renderer | `compile` 后 `dev` 手测两个窗口 |
 | 插件机制相关 | 插件全流程 fixture（§2.8 / dsh插件开发.md §5） |
@@ -366,6 +370,8 @@ pnpm run smoke            # 6. 可选：引擎 boot 冒烟（动过引擎/安装
 pnpm build                # 7. 打包当前平台、当前架构产物到 release/
 ```
 
+**升级已有引擎版本**：用 `pnpm run engine-update` 一条命令代替上面第 4~6 步（查最新 → 改 LOCKED → install → rebuild → smoke，改完 review 未提交的 LOCKED diff）。首次 / 换机器仍按 4~6 原样跑——`engine-update` 默认会查 npm 并可能改写 LOCKED，不适合初始化场景。
+
 > ⚠️ **`pnpm build` 不会安装引擎**：electron-builder 的 `extraResources` 只是把 `resources/engine` **原样拷进应用包**，不会帮你拉依赖。换机器 / 清了 `resources/` / 引擎版本变了却跳过第 4 步，直接 build 打出的应用**没有引擎**，启动会弹「未找到 dsh 引擎」。
 
 **只改壳代码（`src/`）时**：第 1~4 步不用重跑，直接 `pnpm build`（内部已含 compile）即可。
@@ -375,6 +381,7 @@ pnpm build                # 7. 打包当前平台、当前架构产物到 releas
 | 命令 | 作用 | 何时跑 |
 |---|---|---|
 | `pnpm build` | compile + electron-builder 出**当前平台、当前架构**产物到 `release/`（本机 Intel Mac → x64 dmg/zip） | 打本地自测包；签名/公证凭据从 env 三层文件自动加载（§2.7），无凭据则跳过 |
+| `pnpm run engine-update` | 一条命令升级引擎：查最新 → 改 `LOCKED` → install → rebuild → smoke（`--no-bump` 仅按当前重装） | 升级引擎版本（本地，§2.4） |
 | `pnpm run install-engine` | 装锁定版本引擎到 resources/engine（registry 主路径，首次约 7 分钟） | 首次、升级引擎、换机器 |
 | `pnpm run rebuild-engine` | 重编引擎非 N-API 原生模块 | 换 Electron 大版本后 |
 | `pnpm run smoke` | 引擎冒烟（Electron-as-Node boot + 健康检查 + 优雅退出） | 动过引擎/安装逻辑后 |
@@ -441,7 +448,7 @@ pnpm build                # 7. 打包当前平台、当前架构产物到 releas
 
 | 任务 | 步骤 |
 |---|---|
-| 升级引擎版本 | 改 `scripts/install-engine.mjs` 的 `LOCKED` → `pnpm run install-engine` → `pnpm run rebuild-engine` → `pnpm run smoke` → 打包验证 |
+| 升级引擎版本 | `pnpm run engine-update`（默认查 npm latest 并改写 `LOCKED`，`--no-bump` 仅按当前重装）→ review 未提交的 LOCKED diff（`git diff scripts/install-engine.mjs`）→ 提交 → 发版 |
 | 升级 Electron | 改 package.json 版本 → `CI=true pnpm install --no-frozen-lockfile` → 核对内嵌 Node 满足引擎 engines（≥ 40 = Node 24）→ `rebuild-engine` → `smoke` |
 | 新增管理窗口功能 | 后端放 electron-free 模块（路径注入）→ index.ts 加 IPC handler → preload.cjs 加桥方法 → manager.html/js 加控件 |
 | 出正式发布物 | 见「四、发布」与 docs/发布总结.md（`release` → CI → `publish-release` → `sync-domestic`） |

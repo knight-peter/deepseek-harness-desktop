@@ -338,8 +338,12 @@ function createManagerWindow(): void {
  * The shim dir is prepended to PATH, so scripts like install-engine.mjs and
  * `dsh plugin` resolve pnpm with zero system dependencies. Shim write
  * failures are non-fatal (a system pnpm then works as before).
+ * @param warnings when provided, shim write/cleanup failures are also pushed
+ * here (in addition to console.error) so callers can surface them in the UI —
+ * see updater:apply, where a failed pnpm.cmd write is exactly what makes
+ * engine updates fail with "neither npm nor pnpm is available on PATH".
  */
-function runtimeBinEnv(): Record<string, string> {
+function runtimeBinEnv(warnings?: string[]): Record<string, string> {
   const env: Record<string, string> = { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
   if (!app.isPackaged) return env
   const shim = join(app.getPath('userData'), 'runtime-bin')
@@ -368,18 +372,32 @@ function runtimeBinEnv(): Record<string, string> {
     try {
       rmSync(join(shim, 'pnpm'), { force: true })
     } catch (error) {
-      console.error(`[shell] runtime-bin legacy pnpm cleanup failed:`, String(error))
+      const message = `[shell] runtime-bin legacy pnpm cleanup failed: ${String(error)}`
+      warnings?.push(message)
+      console.error(message)
     }
   }
   try {
     if (process.platform === 'win32') {
-      writeFileSync(pnpmLauncher, `@"${process.execPath}" "${pnpmEntry}" %*\r\n`)
+      // cmd.exe parses .cmd files in the system ANSI codepage, so a UTF-8
+      // shim breaks whenever the install path contains non-ASCII characters
+      // (e.g. a Chinese Windows username → mojibake → "系统找不到指定的路径"
+      // → engine updates fail with "neither npm nor pnpm is available on
+      // PATH" even though the shim exists). UTF-16LE with a BOM is the
+      // classic cmd-safe Unicode batch format: the BOM switches cmd to
+      // Unicode parsing and the embedded paths survive verbatim.
+      writeFileSync(pnpmLauncher, `\uFEFF@"${process.execPath}" "${pnpmEntry}" %*\r\n`, 'utf16le')
     } else {
       writeFileSync(pnpmLauncher, `#!/bin/sh\nexec "${process.execPath}" "${pnpmEntry}" "$@"\n`, { mode: 0o755 })
     }
   } catch (error) {
-    // non-fatal: plugin install / engine update falls back to system pnpm
-    console.error(`[shell] runtime-bin pnpm shim write failed (${pnpmLauncher}):`, String(error))
+    // non-fatal: plugin install / engine update falls back to system pnpm —
+    // but a failed shim write is exactly what makes Windows engine updates
+    // fail with "neither npm nor pnpm is available on PATH", so callers that
+    // care (updater:apply) collect it via `warnings` and surface it in the UI.
+    const message = `[shell] runtime-bin pnpm shim write failed (${pnpmLauncher}): ${String(error)}`
+    warnings?.push(message)
+    console.error(message)
   }
   env.PATH = [shim, env.PATH ?? ''].join(delimiter)
   return env
@@ -831,8 +849,11 @@ ipcMain.handle('updater:apply', async () => {
   // The install/rebuild scripts must see pnpm: use the runtime-bin shim env
   // (a packaged app's process.env.PATH is the minimal GUI PATH and never
   // contains npm/pnpm from user shells — that is what made 应用引擎更新 fail
-  // with "neither npm nor pnpm is available on PATH").
-  const env = runtimeBinEnv()
+  // with "neither npm nor pnpm is available on PATH"). Collect shim-write
+  // diagnostics here so a silently-failed pnpm.cmd (invisible in the GUI
+  // otherwise) is appended to the output the manager window shows.
+  const shimWarnings: string[] = []
+  const env = runtimeBinEnv(shimWarnings)
   // Packaged: scripts/ lives inside the read-only app.asar and derives the
   // engine dir from its own location; hand it the real Resources/engine
   // explicitly. Dev mode keeps the default (repo resources/engine).
@@ -854,6 +875,13 @@ ipcMain.handle('updater:apply', async () => {
       exitCode = result.status
       break
     }
+  }
+  // Surface shim diagnostics in the UI (appended last so the renderer's
+  // `output.slice(-1200)` shows them): a failed pnpm.cmd write means the
+  // next engine update will hit "neither npm nor pnpm is available on PATH"
+  // even when the app itself is current.
+  if (shimWarnings.length > 0) {
+    output += `\n[runtime-bin 垫片诊断]\n${shimWarnings.join('\n')}\n`
   }
   if (ok) await restartEngine()
   return { ok, output, exitCode }
