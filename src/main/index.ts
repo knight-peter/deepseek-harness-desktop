@@ -15,7 +15,7 @@ import { Harness, nodeSatisfiesEngine } from './harness.js'
 import { allowClipboardPermissions, ClipboardWatcher, pasteTextToFocusedWindow } from './clipboard.js'
 import type { Settings, UpdateSourceChoice } from './config.js'
 import { SettingsStore } from './config.js'
-import { PluginManager } from './plugins.js'
+import { compareVersions, PluginManager } from './plugins.js'
 import { diagnoseStartupFailure, Tools } from './tools.js'
 import { backupDshHome, installedEngineVersion, latestEngineVersion } from './updater.js'
 import { probeAllSources, resolveSource, sourceById } from './updateSources.js'
@@ -49,6 +49,28 @@ type ManualCheckResult =
 
 /** Settles the in-flight manual check; set by runUpdateCheck, nulled on settle. */
 let finishManualCheck: ((result: ManualCheckResult) => void) | null = null
+
+/**
+ * App (shell) update state mirrored from autoUpdater events, so the manager
+ * window can show「已是最新 / 发现新版本 / 下载完成可重启」and only then
+ * reveal an update button. `available: null` = not checked yet.
+ */
+let appUpdateKnown: { available: boolean | null; downloaded: boolean; version?: string } | null = null
+
+/** Cached engine version check (installed + npm latest) shared with the manager. */
+const ENGINE_VERSION_TTL_MS = 5 * 60_000
+let engineVersionCache: { installed: string | null; latest: string | null; checkedAt: number } | null = null
+
+/**
+ * Dev aid: run a second instance side by side with an installed copy. The
+ * single-instance lock, settings and runtime-bin all live under userData, so
+ * point it elsewhere (e.g. DSH_DESKTOP_USER_DATA=/tmp/dsh-dev-userdata) to
+ * keep the dev instance from fighting the already-running app.
+ */
+const userDataOverride = process.env.DSH_DESKTOP_USER_DATA
+if (userDataOverride !== undefined && userDataOverride !== '') {
+  app.setPath('userData', userDataOverride)
+}
 
 const settings = new SettingsStore(app.getPath('userData'))
 
@@ -151,6 +173,36 @@ function broadcast(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(channel, payload)
   }
+}
+
+/** Push a payload to the manager window only (if it is open). */
+function emitManager(channel: string, payload: unknown): void {
+  if (managerWindow !== null && !managerWindow.isDestroyed()) {
+    managerWindow.webContents.send(channel, payload)
+  }
+}
+
+/** Record app-update state from autoUpdater events and mirror it to the manager. */
+function updateAppKnown(state: { available: boolean | null; downloaded: boolean; version?: string }): void {
+  appUpdateKnown = state
+  emitManager('app:update-state', {
+    packaged: app.isPackaged,
+    current: app.getVersion(),
+    ...state,
+  })
+}
+
+/** Engine version check with a short TTL; `force` bypasses the cache. */
+async function refreshEngineVersionInfo(force: boolean): Promise<{ installed: string | null; latest: string | null }> {
+  const now = Date.now()
+  if (!force && engineVersionCache !== null && now - engineVersionCache.checkedAt < ENGINE_VERSION_TTL_MS) {
+    return { installed: engineVersionCache.installed, latest: engineVersionCache.latest }
+  }
+  const installed = installedEngineVersion({ engineDir: engineDir(), dshHome: dshHome() })
+  const latest = await latestEngineVersion()
+  engineVersionCache = { installed, latest, checkedAt: now }
+  emitManager('updater:engine-state', { installed, latest })
+  return { installed, latest }
 }
 
 const harness = new Harness({
@@ -475,7 +527,7 @@ function installMenu(): void {
     {
       label: '窗口',
       submenu: [
-        { label: '管理窗口（插件 / 调试 / 设置）', accelerator: 'CmdOrCtrl+,', click: () => createManagerWindow() },
+        { label: '管理窗口（插件 / 设置 / 开发调试）', accelerator: 'CmdOrCtrl+,', click: () => createManagerWindow() },
         { label: '重新加载引擎', accelerator: 'CmdOrCtrl+R', click: () => { void restartEngine() } },
         { label: '打开网页版本', click: () => openWebVersionInBrowser() },
       ],
@@ -522,21 +574,25 @@ function setupAutoUpdater(): void {
   // a startup check stays silent because `finishManualCheck` is null then.
   autoUpdater.on('update-available', (info) => {
     appLog('info', `[updater] update available: ${info.version}`)
+    updateAppKnown({ available: true, downloaded: false, version: info.version })
     finishManualCheck?.({ ok: true, outcome: { kind: 'available', version: info.version } })
   })
 
   autoUpdater.on('update-not-available', () => {
     appLog('info', '[updater] no update available')
+    updateAppKnown({ available: false, downloaded: false })
     finishManualCheck?.({ ok: true, outcome: { kind: 'not-available' } })
   })
 
   autoUpdater.on('error', (error) => {
     appLog('error', `[updater] error: ${String(error instanceof Error ? error.stack ?? error : error)}`)
+    updateAppKnown({ available: null, downloaded: false })
     finishManualCheck?.({ ok: false, error: error instanceof Error ? error : new Error(String(error)) })
   })
 
   autoUpdater.on('update-downloaded', (info) => {
     appLog('info', `[updater] update downloaded: ${info.version}`)
+    updateAppKnown({ available: true, downloaded: true, version: info.version })
     const win = BrowserWindow.getFocusedWindow() ?? mainWindow
     if (win === null || win.isDestroyed()) return
     void dialog
@@ -789,8 +845,22 @@ async function boot(): Promise<void> {
     return
   }
   await startEngine()
+  // Startup version checks (once per launch, quiet, deferred a few seconds so
+  // they never contend with engine boot): plugins / engine latest / app update
+  // (packaged). Results are cached and pushed to the manager window, whose
+  //「引擎更新 / 应用更新」只在确认有新版本后才显示更新按钮.
+  setTimeout(() => {
+    void runPluginVersionCheck(true).catch((error) => {
+      console.error('[plugins] startup version check failed:', error)
+    })
+    void refreshEngineVersionInfo(false).catch((error) => {
+      console.error('[updater] startup engine version check failed:', error)
+    })
+  }, 4_000)
   if (process.env.DSH_DESKTOP_OPEN_MANAGER === '1') createManagerWindow()
-  if (app.isPackaged && settings.get().autoCheckUpdates === true) {
+  // 发布版启动即自动检查应用更新（无需设置项）：有新版本则后台自动下载，
+  // 下载完成弹出提示；事件会同步给管理窗口「应用更新」区。
+  if (app.isPackaged) {
     void checkUpdatesWithFallback().catch(() => { /* offline or not configured */ })
   }
 }
@@ -841,6 +911,77 @@ app.on('before-quit', (event) => {
 process.on('SIGINT', () => app.quit())
 process.on('SIGTERM', () => app.quit())
 
+// ── Plugin manager helpers ─────────────────────────────────────────────────
+
+/** Forward a plugin-operation progress chunk to the manager window. */
+function emitPluginProgress(payload: { op: string; chunk: string; stream: 'stdout' | 'stderr' }): void {
+  if (managerWindow !== null && !managerWindow.isDestroyed()) {
+    managerWindow.webContents.send('plugins:progress', payload)
+  }
+}
+
+/** Progress callback bound to one operation id for the streaming runners. */
+function pluginProgress(op: string): (chunk: { chunk: string; stream: 'stdout' | 'stderr' }) => void {
+  return ({ chunk, stream }) => emitPluginProgress({ op, chunk, stream })
+}
+
+// ── Plugin version check (startup + manual) ────────────────────────────────
+
+interface PluginVersionEntry {
+  name: string
+  installed: string
+  latest: string | null
+  outdated: boolean
+}
+
+/** Cached result of the last plugin version check (startup or manual). */
+let pluginUpdateCache: PluginVersionEntry[] | null = null
+/** Single-flight guard: concurrent callers share one registry sweep. */
+let pluginCheckInFlight: Promise<PluginVersionEntry[]> | null = null
+
+/** Registry-queryable dependencies only: no template layer, no file/link/git specs. */
+function isRegistryCheckable(spec: string | undefined): boolean {
+  if (spec === undefined) return false
+  return !spec.startsWith('file:')
+    && !spec.startsWith('link:')
+    && !/^git\+|^github:|\.git(?:#|$)/.test(spec)
+}
+
+/**
+ * One quiet sweep over the web profile's registry dependencies: latest from
+ * `registry.npmjs.org`, naive compare against the installed version. Caches
+ * the result; when `broadcast` is true the manager window is notified so a
+ * startup check that finishes later still updates an already-open window.
+ * Never throws (registry failures degrade per-package to `latest: null`).
+ */
+async function runPluginVersionCheck(broadcast: boolean): Promise<PluginVersionEntry[]> {
+  if (pluginCheckInFlight !== null) return pluginCheckInFlight
+  const run = (async (): Promise<PluginVersionEntry[]> => {
+    const pm = pluginManager()
+    const entries = pm.list().filter((plugin) => !plugin.template && isRegistryCheckable(plugin.spec))
+    const results = await Promise.all(entries.map(async (plugin) => {
+      const latest = await pm.registryLatest(plugin.name)
+      return {
+        name: plugin.name,
+        installed: plugin.version,
+        latest,
+        outdated: latest !== null && compareVersions(latest, plugin.version) > 0,
+      }
+    }))
+    pluginUpdateCache = results
+    if (broadcast && managerWindow !== null && !managerWindow.isDestroyed()) {
+      managerWindow.webContents.send('plugins:updates', results)
+    }
+    return results
+  })()
+  pluginCheckInFlight = run
+  try {
+    return await run
+  } finally {
+    pluginCheckInFlight = null
+  }
+}
+
 // ── IPC ────────────────────────────────────────────────────────────────────
 
 ipcMain.handle('harness:get-state', () => harness.currentState)
@@ -849,35 +990,152 @@ ipcMain.handle('harness:restart', () => restartEngine())
 ipcMain.handle('app:quit', () => app.quit())
 ipcMain.handle('app:open-manager', () => createManagerWindow())
 
+/** 当前应用更新状态（含打包版当前版本），供管理窗口初始渲染。 */
+ipcMain.handle('app:update-state', () => ({
+  packaged: app.isPackaged,
+  current: app.getVersion(),
+  available: appUpdateKnown?.available ?? null,
+  downloaded: appUpdateKnown?.downloaded ?? false,
+  version: appUpdateKnown?.version,
+}))
+
+/**
+ * 纯 HTTP 取发布源最新版本（开发版检查用，不依赖 electron-updater）：
+ * GitHub 走 releases/latest 的 tag；GitCode 走 generic feed 的 latest-mac.yml。
+ * 解析不到/网络失败返回 null（≠ 已是最新）。
+ */
+async function fetchAppLatestVersionFromSources(): Promise<string | null> {
+  const source = await resolveSource(settings.get().updateSource ?? 'auto')
+  try {
+    if (source.feed.provider === 'github') {
+      const response = await fetch(
+        `https://api.github.com/repos/${source.feed.owner}/${source.feed.repo}/releases/latest`,
+        { headers: { accept: 'application/vnd.github+json', 'user-agent': 'dsh-desktop-dev-check' }, signal: AbortSignal.timeout(8_000) },
+      )
+      if (!response.ok) return null
+      const json = (await response.json()) as { tag_name?: unknown }
+      if (typeof json.tag_name !== 'string') return null
+      const tag = json.tag_name.replace(/^v/, '')
+      return tag === '' ? null : tag
+    }
+    const response = await fetch(`${source.feed.url}latest-mac.yml`, { signal: AbortSignal.timeout(8_000) })
+    if (!response.ok) return null
+    const text = await response.text()
+    const match = /^version:\s*(\S+)/m.exec(text)
+    return match === null ? null : match[1]
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Manager「检查更新」：发布版跑 electron-updater 静默检查并返回结论；开发版
+ * 也能用——纯 HTTP 对比发布源最新版（只报告，不能安装）。
+ */
+ipcMain.handle('app:check-updates', async () => {
+  if (app.isPackaged) {
+    const result = await runUpdateCheck()
+    if (result.ok && result.outcome.kind === 'available') {
+      updateAppKnown({ available: true, downloaded: false, version: result.outcome.version })
+      return { packaged: true, available: true, downloaded: false, version: result.outcome.version }
+    }
+    if (!result.ok) {
+      updateAppKnown({ available: null, downloaded: false })
+      return { packaged: true, available: null, downloaded: false }
+    }
+    updateAppKnown({ available: false, downloaded: false })
+    return { packaged: true, available: false, downloaded: false }
+  }
+  // 开发版：仅 HTTP 查询发布源，禁用安装侧。
+  const latest = await fetchAppLatestVersionFromSources()
+  if (latest === null) {
+    updateAppKnown({ available: null, downloaded: false })
+    return { packaged: false, available: null, downloaded: false }
+  }
+  const available = compareVersions(latest, app.getVersion()) > 0
+  updateAppKnown({ available, downloaded: false, version: available ? latest : undefined })
+  return { packaged: false, available, downloaded: false, version: available ? latest : undefined }
+})
+
+/**
+ * Manager「重启并安装」：仅在发布版且新版本已下载完成时退出并安装；否则返回
+ * false 让界面提示。quitAndInstall 10s 未退出时兜底 app.quit()（同菜单路径）。
+ */
+ipcMain.handle('app:apply-update', async () => {
+  if (!app.isPackaged || appUpdateKnown?.downloaded !== true) return false
+  appLog('info', '[updater] manager 点击重启安装 → autoUpdater.quitAndInstall()')
+  autoUpdater.quitAndInstall()
+  setTimeout(() => {
+    appLog('warn', '[updater] quitAndInstall 10s 内未触发退出，兜底 app.quit()（Squirrel 暂存可能失败）')
+    app.quit()
+  }, 10_000)
+  return true
+})
+
 // Clipboard: current text + insert-into-focused-fallback (the menu item and
 // the renderer both route through these).
 ipcMain.handle('clipboard:read-text', () => clipboard.readText())
 ipcMain.handle('clipboard:paste-focused', () => pasteClipboardIntoFocused())
 
 ipcMain.handle('plugins:list', () => pluginManager().list())
+
 ipcMain.handle('plugins:scaffold', async (_event, name: string) => {
   const scaffold = pluginManager().scaffold(name)
   if (!scaffold.ok || scaffold.dir === undefined) return scaffold
   // Mount immediately: file: link + reconcile + engine restart.
-  const result = pluginManager().install(`file:${scaffold.dir}`)
-  if (result.ok) await restartEngine()
-  return { ...scaffold, install: result }
+  const install = await pluginManager().install(`file:${scaffold.dir}`, pluginProgress('install'))
+  if (install.ok) await restartEngine()
+  return { ...scaffold, install }
 })
+
 ipcMain.handle('plugins:install', async (_event, spec: string) => {
-  const result = pluginManager().install(spec)
+  const result = await pluginManager().install(spec, pluginProgress('install'))
   if (result.ok) await restartEngine()
   return result
 })
+
+/**
+ * Approve build scripts that pnpm blocked/skipped, then re-run the add.
+ * Mirrors the official `pnpm approve-builds --all` + re-add flow in the UI.
+ */
+ipcMain.handle('plugins:approve-install', async (_event, payload: { spec: string; packages: string[] }) => {
+  const pm = pluginManager()
+  const approve = await pm.approveBuilds(payload.packages, pluginProgress('approve'))
+  if (!approve.ok) return { ok: false, approve }
+  const install = await pm.install(payload.spec, pluginProgress('install'))
+  if (install.ok) await restartEngine()
+  return { ok: install.ok, approve, install }
+})
+
 ipcMain.handle('plugins:uninstall', async (_event, name: string) => {
-  const result = pluginManager().uninstall(name)
+  const result = await pluginManager().uninstall(name, pluginProgress('uninstall'))
   if (result.ok) await restartEngine()
   return result
 })
+
 ipcMain.handle('plugins:update', async (_event, name?: string) => {
-  const result = pluginManager().update(name)
+  const result = await pluginManager().update(name, pluginProgress('update'))
   if (result.ok) await restartEngine()
   return result
 })
+
+/** Latest registry version for each installed registry dependency (`file:`/`link:`/git skipped). */
+ipcMain.handle('plugins:check-updates', async () => runPluginVersionCheck(false))
+
+/**
+ * Startup results for the manager window: returns the cached sweep when one
+ * already ran (app boot), otherwise kicks a quiet background sweep that will
+ * push `plugins:updates` when it lands and returns the cache (possibly null).
+ */
+ipcMain.handle('plugins:startup-updates', () => {
+  if (pluginUpdateCache === null && pluginCheckInFlight === null) {
+    void runPluginVersionCheck(true).catch((error) => {
+      console.error('[plugins] startup version check failed:', error)
+    })
+  }
+  return pluginUpdateCache
+})
+
 ipcMain.handle('plugins:open-profile', () => shell.openPath(profileDir()))
 
 ipcMain.handle('tools:dump-config', () => tools().dumpConfig())
@@ -893,10 +1151,7 @@ ipcMain.handle('tools:write-patch', (_event, name: 'profile' | 'home', text: str
 ipcMain.handle('settings:get', () => settings.get())
 ipcMain.handle('settings:set', (_event, patch: Partial<Settings>) => settings.update(patch))
 
-ipcMain.handle('updater:engine-version', async () => ({
-  installed: installedEngineVersion({ engineDir: engineDir(), dshHome: dshHome() }),
-  latest: await latestEngineVersion(),
-}))
+ipcMain.handle('updater:engine-version', async (_event, force = false) => refreshEngineVersionInfo(force))
 ipcMain.handle('updater:probe-sources', () => probeAllSources())
 ipcMain.handle('updater:backup', () => backupDshHome({ engineDir: engineDir(), dshHome: dshHome() }))
 ipcMain.handle('updater:apply', async () => {

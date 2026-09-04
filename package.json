@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Electron shell hosting the DeepSeek Harness web UI (dsh web) under Electron's embedded Node",
   "author": "Knight-peter",
   "license": "MIT",
@@ -12,7 +12,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "dev": "pnpm run compile && electron .",
+    "dev": "pnpm run compile && node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local --env-file-if-exists=.env.development.local scripts/dev.mjs",
     "compile": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
     "build": "pnpm run compile && node --env-file-if-exists=.env --env-file-if-exists=.env.development --env-file-if-exists=.env.local node_modules/electron-builder/out/cli/cli.js --config electron-builder.config.cjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",

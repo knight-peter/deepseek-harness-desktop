@@ -226,7 +226,17 @@ dsh-desktop/
 
 壳**不实现**插件机制（加载/注册/分层/reconcile/HMR 全是上游 Cordis 插件树的事），只做「调命令、捕获输出、编排重启」（AD-6/AD-7）——这是项目成立的根基，别在壳里复制机制。
 
-**管线**：管理窗口面板操作 → IPC（`plugins:*`）→ `PluginManager` → `spawnSync(node, ['--expose-internals', dshBin, 'plugin', '--profile', 'web', add|remove|update, ...])`（300s 超时）→ 成功则自动重启引擎。插件的**写法**见《dsh插件开发.md》。
+**管线**：管理窗口面板操作 → IPC（`plugins:*`）→ `PluginManager` → 流式 spawn `node --expose-internals dshBin plugin --profile web add|remove|update`（chunk 实时转发给管理窗口，300s 超时强杀）→ 成功则自动重启引擎。插件的**写法**见《dsh插件开发.md》。
+
+**M1/M2 改进（2026-09-03 新增）**：插件管线从「spawnSync + 尾部输出」升级为「流式 + 分类 + 可处置」——
+
+- **三态分类**（`analyzePluginOutput`，plugins.ts）：把 `dsh plugin` 结果归为可处置的 typed issue —— `build-approval`（pnpm ≥10/11 拦依赖构建脚本，如 node-pty）、`git-prepare`（git 插件 prepare 脚本被拦，上游会打 allowBuilds 提示）、`pnpm-missing`、`registry`（404/ETARGET）、`network`。pnpm 10 非 strict 默认下 `add` 会成功但跳过脚本 → 归类为 warning（`warningPackages`），照常装完但提示「放行并重建」。
+- **放行并重装**（IPC `plugins:approve-install`）：UI 按钮 → `PluginManager.approveBuilds()` 把 `allowBuilds: { <pkg>: true }` 合并进 `$DSH_HOME/profiles/web/pnpm-workspace.yaml`（js-yaml 读写；该 map 格式 pnpm 10.34.5 与 11 通用，等价官方 `pnpm approve-builds` 的产物）→ 在 profile 目录跑 `pnpm install`（让新放行的脚本真正执行）→ 重跑原 `add`（触发 bundles reconcile）→ 重启引擎。开发者/官方 CLI 的「approve-builds 三步」在界面里缩成一次点击。
+- **安装结果摘要**（M2）：install 前后 diff profile manifest（`snapshot()`），对新装包读其 package.json 的 `dsh` 字段分类（bundle 分层 / 客户端 `dsh.client` / 纯普通依赖），界面提示「已加入 bundle 分层」或「未声明 dsh.bundle，只是普通依赖不会挂载」；`list()` 行类型徽标同步扩展（bundle / 客户端 / 依赖 / 模板）。
+- **检查更新**（IPC `plugins:check-updates`）：对每个 registry 依赖（跳过 `file:`/`link:` 与模板层）查 `registry.npmjs.org` 的 `dist-tags.latest`，界面标「可更新」并提供「全部更新」（即 `dsh plugin update` 不带包名）。
+- **启动自动版本检查（2026-09-04 新增）**：应用启动 4s 后跑一次 registry 检查（`runPluginVersionCheck`：单飞 + 结果缓存 `pluginUpdateCache`；`plugins:startup-updates` 返回缓存、无缓存时惰性补跑一次后台检查；检查完成后以 `plugins:updates` 推送给已打开的管理窗口）。渲染层对所有能查到最新版的 registry 依赖行做三态呈现：版本列标「最新」（最新版 ≤ 已装）或「可更新 → x.y.z」（**最新版 > 已装，`compareVersions` semver 比较、预发布感知**——`0.1.8` 已装对发布源 `0.1.6` 不算更新），**更新按钮只在确有可更新版本时出现**；本地目录 / git / 离线查询不到的只显示版本、无更新按钮。registry 检查会跳过 git spec（`git+…`/`.git`），避免误查。
+- **UI 布局与操作反馈（2026-09-04）**：作用于**全部已装插件**的操作（刷新 / 检查更新 / 全部更新）移到插件表格**标题栏右侧**，与下方「安装单个插件」的输入行分开，避免把整表操作误读为某个安装动作；「全部更新」按钮实时显示数量（无更新时叫「全部更新」，有 n 个可更新时叫「全部更新（n）」）。操作结果一律改为**窗口顶部居中的穿透式 toast 轻提示**（同时只显示一条，新提示替换旧提示；半透明 + `pointer-events:none`，即使浮在按钮上方也不挡点击/视线；ok/info 约 3s、warn/err 约 5–6s 自动淡出；进行中为带转圈动画的 busy 条，结束后被结果替换）；多行细节输出（安装摘要、pnpm 报错尾部）保留在页面底部「操作日志」（`#action-log`），插件页内不再有常驻状态行（`#plugin-status` 移除）。
+- 失败不再静默：所有 mutation 的 pnpm/引擎输出在管理窗口实时显示，错误按 issue 类型给「放行并重装 / 打开 profile 目录」等处置按钮。
 
 **打包态怎么跑 pnpm**（AD-8，`runtimeBinEnv`/`cliCommandEnv`）：用户机器可能没有 Node/pnpm，且 **GUI 启动的进程 PATH 是最小集**（`/usr/bin:/bin:…`，不含用户 shell 的 mise/nvm 路径——这就是「应用引擎更新」报 `neither npm nor pnpm is available on PATH` 的根因）。壳在 userData 下建 `runtime-bin/`：
 
@@ -251,8 +261,9 @@ PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engin
 |---|---|
 | `checkoutPath` | 开发模式引擎来源（上游源码目录） |
 | `inspectPort` | 给引擎加 `NODE_OPTIONS=--inspect=<port>`，Chrome DevTools attach（高级断点） |
-| `autoCheckUpdates` | 启动时是否自动检查应用更新（默认关） |
 | `updateSource` | 应用更新源：auto（GitCode 优先 + GitHub 兜底）/ 固定 github / 固定 gitcode |
+
+> 2026-09-04：`autoCheckUpdates` 设置项已移除——发布版**启动即自动检查**应用更新，管理窗口「应用更新」区通过 `app:update-state`/`plugins:` 式推送显示状态，确认新版本下载完成才显示「重启并安装」按钮；引擎更新同理（`refreshEngineVersionInfo` 5 分钟缓存 + `updater:engine-state` 推送），`updater:engine-version` 增加 `force` 参数绕过缓存。
 
 **引擎更新相关（updater.ts）**：`latestEngineVersion()` 查 npm registry；`installedEngineVersion()` 读引擎包版本；`backupDshHome()` 把 `$DSH_HOME` 复制成 `$DSH_HOME-backup-<时间戳>`。
 

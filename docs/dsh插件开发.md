@@ -253,7 +253,8 @@ export function apply(ctx) {
 ## 六、注意事项与坑（都踩过）
 
 - **本地目录安装必须绝对路径**：上游 `anchorPathSpec` 会把相对路径锚到调用 cwd；`file:` 链接安装后改代码重建即生效（重启引擎）。壳的「新建插件」已用绝对路径，手动装本地目录时注意。
-- **git 依赖被 pnpm ≥10 拦 prepare 脚本** → 按提示在 profile 的 `pnpm-workspace.yaml` 配 `allowBuilds`。
+- **git 依赖被 pnpm ≥10 拦 prepare 脚本** → 按提示在 profile 的 `pnpm-workspace.yaml` 配 `allowBuilds`。桌面版插件页已提供「放行并重装」按钮：自动写 `allowBuilds`、重跑 `pnpm install` 与 `add`（2026-09-03 起），等价官方 `pnpm approve-builds --all` 流程。
+- **npm 依赖的构建脚本被拦（如 node-pty）**：pnpm ≥10 默认不执行依赖构建脚本（pnpm 11 strict 直接失败、pnpm 10 警告跳过）——桌面版插件页同样可用「放行并重装」一键处理；纯 CLI 则 `cd $DSH_HOME/profiles/web && pnpm approve-builds` 后重跑 `dsh plugin add`。
 - **原生依赖**：node-gyp 模块在 Electron 内嵌 Node 下可能需要 `@electron/rebuild`（`pnpm run rebuild-engine` 对 `resources/engine` 全树处理）；**优先用 N-API 免重编**。
 - **安全边界**：插件代码与 shell 同权，只装可信来源的插件——这是产品文档和代码注释里都要反复强调的点。
 - **patch 行没生效**：先 `dump-config` 看分层位置，再确认 `id` 没有被其他层覆盖（§4.5）。
