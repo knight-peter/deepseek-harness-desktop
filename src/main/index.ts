@@ -615,13 +615,16 @@ function setupAutoUpdater(): void {
           appLog('info', '[updater] 用户选择立即重启 → autoUpdater.quitAndInstall()')
           autoUpdater.quitAndInstall()
           // macOS 上若 Squirrel.Mac 暂存失败（签名校验不过等），quitAndInstall
-          // 会挂起等待原生 update-downloaded 事件而永不退出；10s 后兜底退出
-          // （此时不安装，但「立即重启」绝不会点了没反应——失败原因见
-          // <userData>/updater.log）。
+          // 会挂起等待原生 update-downloaded 事件而永不退出。
+          // 实测：本应用 ~192MB / 33k 文件，解包约 14s + codesign 校验约 9s，
+          // Squirrel 暂存合计约 23s+（旧 10s 兜底会在装到一半时 app.quit() 掐断，
+          // 造成"关闭了/没重启/重开没更新"）。故超时放宽到 120s，让大 app 有充足
+          // 时间暂存；若超时仍未退出，说明暂存确实失败——此时兜底退出，但已下载的
+          // pending 更新保留，下次启动/退出走 autoInstallOnAppQuit 再试。
           setTimeout(() => {
-            appLog('warn', '[updater] quitAndInstall 10s 内未触发退出，兜底 app.quit()（Squirrel 暂存可能失败）')
+            appLog('warn', '[updater] quitAndInstall 120s 内未触发退出，兜底 app.quit()（Squirrel 暂存可能失败，pending 更新将下次再试）')
             app.quit()
-          }, 10_000)
+          }, 120_000)
         }
       })
   })
