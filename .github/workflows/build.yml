@@ -101,9 +101,11 @@ jobs:
           fi
           if [ -z "$CSC_LINK" ]; then unset CSC_LINK CSC_KEY_PASSWORD; fi
           if [ -z "$APPLE_ID" ]; then unset APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; fi
-          # 路线一自签名证书需要先被 macOS 信任：electron-builder 的身份发现走
-          # `security find-identity -v`，不受信任的自签名证书会被过滤（0 valid
-          # identities）→ 构建变成未签名。信任为根（trustRoot）即可。
+          # 路线一自签名证书：electron-builder 26 用 CSC_LINK 的 p12 自建临时钥匙串并
+          # `security find-identity -v` 找身份；`-v` 只认**已被系统信任**的证书。所以
+          # 把自签名证书加进**系统/管理员信任域（admin trust）**即可让它认成 valid。
+          # 用 `sudo ...`（不加 `-k login.keychain-db`），避免之前 -k 用户钥匙串时在
+          # headless runner 上挂起钥匙串授权（2h+）。
           if [ "$RUNNER_OS" = "macOS" ] && [ -n "$DSH_MAC_CSC_LINK" ]; then
             # secret 粘贴时可能带入换行/空格（多行 base64 合法，但须先清空白
             # 再解码；引号等非 base64 字符则直接报错并给出修复指引）。
@@ -113,7 +115,8 @@ jobs:
               exit 1
             fi
             openssl pkcs12 -in "$RUNNER_TEMP/dsh-release.p12" -passin "pass:$DSH_MAC_CSC_KEY_PASSWORD" -nokeys -clcerts -out "$RUNNER_TEMP/dsh-release.crt"
-            security add-trusted-cert -d -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$RUNNER_TEMP/dsh-release.crt"
+            # 系统/管理员信任域（不加 -k login keychain），headless 下不弹钥匙串授权
+            sudo security add-trusted-cert -d -r trustRoot "$RUNNER_TEMP/dsh-release.crt"
           fi
           pnpm run build ${{ startsWith(github.ref, 'refs/tags/') && '--publish onTagOrDraft' || '--publish never' }}
         env:
