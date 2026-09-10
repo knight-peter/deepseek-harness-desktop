@@ -25,8 +25,17 @@ function render(state) {
   statusText.textContent = STATE_TEXT[state.kind] ?? state.kind
   restartButton.disabled = state.kind === 'starting'
   if (state.kind === 'running') {
-    urlEl.textContent = state.url
-    urlEl.href = state.url
+    // 只显示 origin：引擎 0.1.5 起 URL 带 `?token=`，而这是换取会话 cookie 的
+    // 凭据——状态页常被截图/分享，把它渲染成可点击链接会直接泄露引擎访问权。
+    // origin 已足够让用户知道引擎跑在哪个地址、点开看是否在监听。
+    let origin = state.url
+    try {
+      origin = new URL(state.url).origin
+    } catch {
+      // 解析失败就原样显示（旧引擎的裸 URL 本就不含凭据）
+    }
+    urlEl.textContent = origin
+    urlEl.href = origin
   } else {
     urlEl.textContent = ''
     urlEl.removeAttribute('href')

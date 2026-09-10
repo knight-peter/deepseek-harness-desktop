@@ -70,6 +70,32 @@ export interface StartOptions {
 const URL_LINE = /dsh web: (https?:\/\/127\.0\.0\.1:\d+[^\s]*)/
 
 /**
+ * Strip engine session tokens from a log line.
+ *
+ * The engine prints its boot URL — `dsh web: http://127.0.0.1:<port>/?token=…`
+ * — on stdout. Those lines are buffered for the manager's 「导出日志」 button,
+ * and the token is a bearer credential: anyone holding it can exchange it for a
+ * 30-day session cookie and read the whole UI. Users attach that log to bug
+ * reports, so the token must be masked at the point it enters the buffer.
+ */
+function redactToken(line: string): string {
+  return line.replace(/([?&]token=)[^\s&"']+/gi, '$1<redacted>')
+}
+
+/**
+ * Origin (`scheme://host:port`) of a URL, for messages that reach logs. Drops
+ * the path and query: engine ≥ 0.1.5 puts a `?token=` credential there, and the
+ * token exchanges for a full-access session cookie.
+ */
+function originOfUrl(url: string): string {
+  try {
+    return new URL(url).origin
+  } catch {
+    return '(unparseable engine url)'
+  }
+}
+
+/**
  * Fetch the engine page and report whether it is really serving.
  *
  * Engine ≥ 0.1.5 gates `/` behind a per-boot bearer token handed out on the
@@ -115,11 +141,15 @@ export class Harness {
   }
 
   private recordLog(line: string, stream: 'stdout' | 'stderr'): void {
-    this.recent.push(line)
+    // Redact before buffering: the buffer is what 「导出日志」 hands to users,
+    // who attach it to bug reports. The engine prints its `?token=` on stdout
+    // at boot, and that token exchanges for a full-access session cookie.
+    const safe = redactToken(line)
+    this.recent.push(safe)
     if (this.recent.length > Harness.MAX_RECENT) {
       this.recent.splice(0, this.recent.length - Harness.MAX_RECENT)
     }
-    this.events.onLog(line, stream)
+    this.events.onLog(safe, stream)
   }
 
   private setState(next: HarnessState): void {
@@ -239,7 +269,9 @@ export class Harness {
         // not listening yet
       }
       if (Date.now() > deadline) {
-        throw new Error(`harness: health check timed out (${timeoutMs}ms): ${url}`)
+        // Origin only — the URL may carry the engine's `?token=`, and this
+        // message is surfaced in the UI and written to the exportable log.
+        throw new Error(`harness: health check timed out (${timeoutMs}ms): ${originOfUrl(url)}`)
       }
       await new Promise((resolve) => setTimeout(resolve, 500))
     }

@@ -169,6 +169,18 @@ function resolveDshBin(): string {
   return ''
 }
 
+/**
+ * Origin (`scheme://host:port`) of a URL, for logs. Drops the path and query —
+ * the engine's `?token=` credential lives there and must not reach log files.
+ */
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin
+  } catch {
+    return '(unparseable engine url)'
+  }
+}
+
 function broadcast(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(channel, payload)
@@ -223,7 +235,12 @@ const harness = new Harness({
     // engine UI once the health check passes (and again after a restart).
     if (state.kind === 'running' && !engineUiLoaded && mainWindow !== null) {
       engineUiLoaded = true
-      console.log('[shell] loading engine UI:', state.url)
+      // Log the origin only: since engine 0.1.5 the URL carries a single-use
+      // `?token=` that exchanges for a session cookie, and this line ends up in
+      // the exported engine log (see harness.recentLogs / 「导出日志」) that users
+      // attach to bug reports. The token grants full UI access to whoever holds
+      // it, so it must never be written down.
+      console.log('[shell] loading engine UI:', originOf(state.url))
       void mainWindow.loadURL(state.url)
     }
     // An engine failure while the window shows the engine UI must bring the

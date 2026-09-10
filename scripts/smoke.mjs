@@ -64,7 +64,11 @@ async function main() {
       else if (Date.now() > deadline) { clearInterval(timer); reject(new Error('timed out waiting for the URL line')) }
     }, 200)
   })
-  console.log(`smoke: engine URL = ${url}`)
+  // Log the origin only. Engine ≥ 0.1.5 puts a `?token=…` credential in this
+  // URL; CI logs are retained and the token grants full UI access to whoever
+  // holds it (it exchanges for a 30-day session cookie). The path/query is
+  // never needed to diagnose a smoke failure — the origin identifies the run.
+  console.log(`smoke: engine URL = ${new URL(url).origin}`)
 
   // Health check: HTTP 200 + __DSH_BOOT__ injection.
   // Engine ≥ 0.1.5 answers the token URL with a 303 that sets the session
