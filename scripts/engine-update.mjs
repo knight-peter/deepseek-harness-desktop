@@ -1,34 +1,32 @@
 /**
  * One-command engine update (Phase 2 convenience wrapper).
  *
- * Bumps the pinned engine versions in install-engine.mjs's `LOCKED` block to
+ * Bumps the pinned engine version in install-engine.mjs (`DEFAULT_ENGINE_VERSION`) to
  * the latest published versions, then runs the standard verification chain
  * (install-engine → rebuild-engine → smoke) against the new pin.
  *
  *   pnpm run engine-update              # default: query npm latest → rewrite
- *                                       # LOCKED (left uncommitted) → install →
- *                                       # rebuild → smoke
- *   pnpm run engine-update --no-bump    # skip the LOCKED rewrite — reinstall /
- *                                       # repair with the currently pinned versions
+ *                                       # DEFAULT_ENGINE_VERSION (left
+ *                                       # uncommitted) → install → rebuild → smoke
+ *   pnpm run engine-update --no-bump    # skip the version rewrite — reinstall /
+ *                                       # repair with the currently pinned version
  *   pnpm run engine-update --version 0.1.1-rc.2  # pin @deepseek-ai/dsh to an
- *                                       # explicit version (dsh-web-frontend
- *                                       # still follows npm latest)
+ *                                       # explicit version
  *   pnpm run engine-update --dry-run    # print old → new without touching anything
  *   pnpm run engine-update --no-smoke   # skip the boot smoke test
  *
  * Design notes:
  *   - LOCAL developer convenience only. CI (build.yml) and the packaged app
  *     (updater:apply) keep calling install-engine.mjs / rebuild-engine.mjs
- *     directly — CI must build the committed LOCKED, and the app must never
- *     mutate its (read-only asar) LOCKED.
- *   - The LOCKED rewrite is intentionally NOT committed: it is a source-level
+ *     directly — CI must build the committed default, and the app must never
+ *     mutate its (read-only asar) default — it passes DSH_ENGINE_VERSION instead (see src/main/index.ts updater:apply).
+ *   - The version rewrite is intentionally NOT committed: it is a source-level
  *     dependency pin and gets the same review/commit discipline as any other
  *     code change. Review with `git diff scripts/install-engine.mjs`.
  *   - Steps reuse the existing scripts unchanged (thin orchestration, no
  *     duplicated logic); the first failing step aborts with its exit code.
- *   - LOCKED pins both engine packages to one install tree (the web frontend
- *     must resolve from the same node_modules), so both are always bumped
- *     together.
+ *   - `dsh` is the only version axis: the web frontend follows it through
+ *     dsh → dsh-web-app → dsh-web-frontend, so there is nothing else to bump.
  * @module dsh-desktop/engine-update
  */
 
@@ -42,8 +40,15 @@ const INSTALL_SCRIPT = join(ROOT, 'scripts', 'install-engine.mjs')
 const REBUILD_SCRIPT = join(ROOT, 'scripts', 'rebuild-engine.mjs')
 const SMOKE_SCRIPT = join(ROOT, 'scripts', 'smoke.mjs')
 
-/** Engine packages pinned together in install-engine.mjs's LOCKED block. */
-const PACKAGES = ['@deepseek-ai/dsh', '@deepseek-ai/dsh-web-frontend']
+/**
+ * The single engine version axis. The web frontend is NOT pinned alongside it:
+ * it resolves transitively through dsh → dsh-web-app → dsh-web-frontend.
+ * Pinning it separately (as this script used to) dragged the tree onto a second
+ * axis — `dsh-web-frontend` publishes `latest` = 0.0.1-rc.5 while its own
+ * dependents require ^0.1.x, so the pin installed an unused copy at the tree
+ * root and left `verify()` checking the wrong one.
+ */
+const ENGINE_PACKAGE = '@deepseek-ai/dsh'
 
 function fail(message) {
   console.error(`engine-update: ${message}`)
@@ -94,63 +99,50 @@ async function latestVersion(pkg) {
   }
 }
 
-/** Current pinned versions read from install-engine.mjs. */
+const DEFAULT_RE = /const DEFAULT_ENGINE_VERSION\s*=\s*'([^']+)'/
+
+/** Current factory default version read from install-engine.mjs. */
 function parseLocked(source) {
-  const versions = new Map()
-  for (const pkg of PACKAGES) {
-    const match = new RegExp(`'${escapeRegExp(pkg)}':\\s*'([^']+)'`).exec(source)
-    if (match === null) fail(`cannot locate the LOCKED entry for ${pkg} in scripts/install-engine.mjs`)
-    versions.set(pkg, match[1])
-  }
-  return versions
+  const match = DEFAULT_RE.exec(source)
+  if (match === null) fail('cannot locate DEFAULT_ENGINE_VERSION in scripts/install-engine.mjs')
+  return match[1]
 }
 
 /**
- * Rewrite the LOCKED block versions and the "registry state verified <date>"
- * comment in place. Returns the new file content (does not write).
+ * Rewrite the DEFAULT_ENGINE_VERSION constant and the "registry state verified
+ * <date>" comment in place. Returns the new file content (does not write).
  */
-function rewriteLocked(source, targets) {
-  let next = source
-  for (const [pkg, version] of targets) {
-    const re = new RegExp(`('${escapeRegExp(pkg)}':\\s*')[^']*(')`)
-    if (!re.test(next)) fail(`cannot locate the LOCKED entry for ${pkg} in scripts/install-engine.mjs`)
-    next = next.replace(re, `$1${version}$2`)
-  }
+function rewriteLocked(source, version) {
+  if (!DEFAULT_RE.test(source)) fail('cannot locate DEFAULT_ENGINE_VERSION in scripts/install-engine.mjs')
   const today = new Date().toISOString().slice(0, 10)
-  next = next.replace(/(registry state verified )\d{4}-\d{2}-\d{2}/, `$1${today}`)
-  return next
+  return source
+    .replace(DEFAULT_RE, `const DEFAULT_ENGINE_VERSION = '${version}'`)
+    .replace(/(registry state verified )\d{4}-\d{2}-\d{2}/, `$1${today}`)
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
 
-  const targets = new Map()
   if (args.bump) {
-    for (const pkg of PACKAGES) {
-      const want = args.explicit !== null && pkg === PACKAGES[0] ? args.explicit : await latestVersion(pkg)
-      if (want === null) {
-        fail(`cannot resolve the latest version of ${pkg} (registry unreachable?) — re-run with --no-bump to reinstall the pinned versions`)
-      }
-      targets.set(pkg, want)
+    const pkg = ENGINE_PACKAGE
+    const want = args.explicit ?? await latestVersion(pkg)
+    if (want === null) {
+      fail(`cannot resolve the latest version of ${pkg} (registry unreachable?) — re-run with --no-bump to reinstall the pinned version`)
     }
     const source = readFileSync(INSTALL_SCRIPT, 'utf8')
-    const current = parseLocked(source)
-    const changed = [...targets].some(([pkg, want]) => current.get(pkg) !== want)
-    for (const [pkg, want] of targets) {
-      const before = current.get(pkg)
-      console.log(`engine-update: ${pkg}: ${before} → ${want}${before === want ? ' (unchanged)' : ''}`)
-    }
-    if (!changed) {
-      console.log('engine-update: LOCKED already at the latest versions — nothing to bump')
-      if (!args.dryRun) console.log('engine-update: skipped install; use --no-bump to force a reinstall of the pinned versions')
+    const before = parseLocked(source)
+    console.log(`engine-update: ${pkg}: ${before} → ${want}${before === want ? ' (unchanged)' : ''}`)
+    if (before === want) {
+      console.log('engine-update: DEFAULT_ENGINE_VERSION already at the latest version — nothing to bump')
+      if (!args.dryRun) console.log('engine-update: skipped install; use --no-bump to force a reinstall of the pinned version')
       return
     }
     if (args.dryRun) {
-      console.log('engine-update: dry-run — LOCKED left untouched, install not run')
+      console.log('engine-update: dry-run — DEFAULT_ENGINE_VERSION left untouched, install not run')
       return
     }
-    writeFileSync(INSTALL_SCRIPT, rewriteLocked(source, targets))
-    console.log('engine-update: LOCKED rewritten in scripts/install-engine.mjs (uncommitted — review with: git diff scripts/install-engine.mjs)')
+    writeFileSync(INSTALL_SCRIPT, rewriteLocked(source, want))
+    console.log('engine-update: DEFAULT_ENGINE_VERSION rewritten in scripts/install-engine.mjs (uncommitted — review with: git diff scripts/install-engine.mjs)')
   } else if (args.dryRun) {
     console.log('engine-update: dry-run with --no-bump — nothing to do')
     return

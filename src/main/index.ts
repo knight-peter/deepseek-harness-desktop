@@ -17,7 +17,7 @@ import type { Settings, UpdateSourceChoice } from './config.js'
 import { SettingsStore } from './config.js'
 import { compareVersions, PluginManager } from './plugins.js'
 import { diagnoseStartupFailure, Tools } from './tools.js'
-import { backupDshHome, installedEngineVersion, latestEngineVersion } from './updater.js'
+import { backupDshHome, factoryEngineVersion, installedEngineVersion, latestEngineVersion } from './updater.js'
 import { probeAllSources, resolveSource, sourceById } from './updateSources.js'
 import { appLog, updaterLogger } from './updaterLog.js'
 
@@ -192,17 +192,25 @@ function updateAppKnown(state: { available: boolean | null; downloaded: boolean;
   })
 }
 
+interface EngineState {
+  installed: string | null
+  latest: string | null
+  /** Version the rollback button would restore (null = rollback unavailable). */
+  factory: string | null
+}
+
 /** Engine version check with a short TTL; `force` bypasses the cache. */
-async function refreshEngineVersionInfo(force: boolean): Promise<{ installed: string | null; latest: string | null }> {
+async function refreshEngineVersionInfo(force: boolean): Promise<EngineState> {
   const now = Date.now()
+  const factory = factoryEngineVersion(app.getAppPath())
   if (!force && engineVersionCache !== null && now - engineVersionCache.checkedAt < ENGINE_VERSION_TTL_MS) {
-    return { installed: engineVersionCache.installed, latest: engineVersionCache.latest }
+    return { ...engineVersionCache, factory }
   }
   const installed = installedEngineVersion({ engineDir: engineDir(), dshHome: dshHome() })
   const latest = await latestEngineVersion()
   engineVersionCache = { installed, latest, checkedAt: now }
-  emitManager('updater:engine-state', { installed, latest })
-  return { installed, latest }
+  emitManager('updater:engine-state', { installed, latest, factory })
+  return { installed, latest, factory }
 }
 
 const harness = new Harness({
@@ -1157,7 +1165,7 @@ ipcMain.handle('settings:set', (_event, patch: Partial<Settings>) => settings.up
 ipcMain.handle('updater:engine-version', async (_event, force = false) => refreshEngineVersionInfo(force))
 ipcMain.handle('updater:probe-sources', () => probeAllSources())
 ipcMain.handle('updater:backup', () => backupDshHome({ engineDir: engineDir(), dshHome: dshHome() }))
-ipcMain.handle('updater:apply', async () => {
+ipcMain.handle('updater:apply', async (_event, target?: 'latest' | 'factory') => {
   // The install/rebuild scripts must see pnpm: use the runtime-bin shim env
   // (a packaged app's process.env.PATH is the minimal GUI PATH and never
   // contains npm/pnpm from user shells — that is what made 应用引擎更新 fail
@@ -1170,8 +1178,32 @@ ipcMain.handle('updater:apply', async () => {
   // engine dir from its own location; hand it the real Resources/engine
   // explicitly. Dev mode keeps the default (repo resources/engine).
   if (app.isPackaged) env.DSH_ENGINE_DIR = join(process.resourcesPath, 'engine')
+
+  // Version channel: the script ships with a factory DEFAULT_ENGINE_VERSION
+  // baked into the read-only asar and has no way to know what the user asked
+  // for. Without this, 「应用引擎更新」 re-installed the factory version forever
+  // while the UI promised the npm latest — the button looked like an upgrade
+  // and behaved like a repair.
+  const factory = factoryEngineVersion(app.getAppPath())
+  let targetVersion = factory
+  let versionNote = `目标引擎版本：v${factory ?? '（未知）'}（出厂版本）`
+  if (target === 'latest') {
+    // Resolve at click time rather than reusing the cache: the whole point is
+    // to install what is newest *now*.
+    const latest = await latestEngineVersion()
+    if (latest !== null) {
+      targetVersion = latest
+      versionNote = `目标引擎版本：v${latest}（npm 最新）`
+    } else {
+      // Offline: fall back to the factory pin and say so instead of silently
+      // reinstalling whatever is already there.
+      versionNote = `无法查询 npm 最新版（网络？）——已回落到出厂版本 v${factory ?? '未知'} 重装。`
+    }
+  }
+  if (targetVersion !== null) env.DSH_ENGINE_VERSION = targetVersion
+
   const scripts = ['install-engine.mjs', 'rebuild-engine.mjs']
-  let output = ''
+  let output = `${versionNote}\n`
   let ok = true
   let exitCode: number | null = null
   for (const script of scripts) {
@@ -1196,7 +1228,7 @@ ipcMain.handle('updater:apply', async () => {
     output += `\n[runtime-bin 垫片诊断]\n${shimWarnings.join('\n')}\n`
   }
   if (ok) await restartEngine()
-  return { ok, output, exitCode }
+  return { ok, output, exitCode, targetVersion, installed: installedEngineVersion({ engineDir: engineDir(), dshHome: dshHome() }) }
 })
 
 // ── lifecycle ──────────────────────────────────────────────────────────────

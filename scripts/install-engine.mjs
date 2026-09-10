@@ -1,8 +1,13 @@
 /**
- * Install the locked dsh engine into `resources/engine` (Phase 2).
- * Main path: npm registry with pinned versions. Fallback: build a
- * DSH_CHECKOUT and install `pnpm pack` tarballs of `apps/cli` and `apps/web`
- * (pnpm pack rewrites workspace: deps to concrete versions).
+ * Install the dsh engine into `resources/engine` (Phase 2).
+ * Main path: npm registry. Fallback: build a DSH_CHECKOUT and install
+ * `pnpm pack` tarballs of `apps/cli` and `apps/web` (pnpm pack rewrites
+ * workspace: deps to concrete versions).
+ *
+ * Version selection: `DSH_ENGINE_VERSION` when set (the packaged app passes
+ * the npm `latest` it shows behind 「应用引擎更新」, or the factory version for
+ * its 「回滚」 button), else DEFAULT_ENGINE_VERSION. Only `dsh` is pinned —
+ * the web frontend resolves transitively, see DEFAULT_ENGINE_VERSION.
  *
  * Atomic upgrade: when an engine already exists, the install happens in a
  * staging dir (`resources/engine.new`) and is swapped in only after
@@ -23,7 +28,8 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -34,15 +40,40 @@ const ENGINE_DIR = process.env.DSH_ENGINE_DIR !== undefined
 const STAGING_DIR = `${ENGINE_DIR}.new`
 const ENGINE_MANIFEST = join(ENGINE_DIR, 'engine.json')
 
-/** Pinned engine packages (registry state verified 2026-08-31). */
-const LOCKED = {
-  '@deepseek-ai/dsh': '0.1.1-rc.2',
-  '@deepseek-ai/dsh-web-frontend': '0.0.1-rc.5',
-}
+/**
+ * Factory default engine version (registry state verified 2026-08-31).
+ * Used when no version is passed (CI, first install, offline) — the packaged
+ * app's `updater:apply` passes DSH_ENGINE_VERSION with the npm `latest` it
+ * already shows in the UI, so an in-app engine update really moves forward.
+ *
+ * Only `dsh` is pinned: the web frontend resolves transitively through
+ * dsh → dsh-web-app → dsh-web-frontend, so pinning it separately would put a
+ * second, unused copy at the tree root *and* drag the engine onto a version
+ * axis its own dependents do not share. See `verify()` for the resolution
+ * anchor that this relies on.
+ */
+const DEFAULT_ENGINE_VERSION = '0.1.1-rc.2'
 
 function fail(message) {
   console.error(`install-engine: ${message}`)
   process.exit(1)
+}
+
+/**
+ * Engine version to install: `DSH_ENGINE_VERSION` when the caller supplies one
+ * (the packaged app passes the npm `latest` behind its update button), else the
+ * factory default. An explicit *empty* value is rejected rather than silently
+ * falling back — a broken caller should not look like a successful pin.
+ */
+function resolveEngineVersion() {
+  const override = process.env.DSH_ENGINE_VERSION
+  if (override === undefined) return DEFAULT_ENGINE_VERSION
+  const version = override.trim()
+  if (version === '') fail('DSH_ENGINE_VERSION is set but empty — unset it to use the factory default')
+  // Same shape the registry validates: reject obviously malformed values here
+  // so a typo surfaces as a clear message instead of a resolver ETARGET.
+  if (!/^[0-9][0-9A-Za-z.\-+]*$/.test(version)) fail(`DSH_ENGINE_VERSION "${version}" is not a valid version`)
+  return version
 }
 
 /**
@@ -121,9 +152,9 @@ function installInto(dir, pm, dependencies) {
   return run(cmd, ['install', '--dir', dir, '--node-linker=hoisted'], dir, { npm_config_strict_dep_builds: 'false' })
 }
 
-/** Registry install with pinned versions. */
-function installFromRegistry(dir, pm) {
-  return installInto(dir, pm, LOCKED)
+/** Registry install of one engine version. */
+function installFromRegistry(dir, pm, version) {
+  return installInto(dir, pm, { '@deepseek-ai/dsh': version })
 }
 
 /** Build a DSH_CHECKOUT and install packed tarballs of apps/cli + apps/web. */
@@ -156,11 +187,32 @@ function installFromCheckout(dir, pm) {
   return installInto(dir, pm, dependencies)
 }
 
-/** Assert the installed tree is bootable: dsh bin + frontend dist present. */
+/**
+ * Locate the frontend dist the engine will actually serve.
+ *
+ * Anchor matters: upstream `dsh-web-app` calls `require.resolve(...)` from its
+ * own directory, so the copy resolved *there* is the one served. Checking the
+ * engine root instead used to pass while the served copy was a different,
+ * nested one — validation that meant nothing. Exported for testing.
+ */
+export function resolveFrontendDist(dir) {
+  const webApp = join(dir, 'node_modules', '@deepseek-ai', 'dsh-web-app')
+  // web-app is the real anchor; the engine root is a fallback for trees where
+  // web-app itself lives nested (non-hoisted layouts).
+  const anchor = existsSync(join(webApp, 'package.json')) ? webApp : dir
+  try {
+    return createRequire(join(anchor, 'package.json')).resolve('@deepseek-ai/dsh-web-frontend/dist/index.html')
+  } catch {
+    return null
+  }
+}
+
+/** Assert the installed tree is bootable: dsh bin + the *served* frontend dist. */
 function verify(dir) {
   const bin = join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-  const dist = join(dir, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist', 'index.html')
   if (!existsSync(bin)) fail(`dsh bin missing: ${bin}`)
+  const dist = resolveFrontendDist(dir)
+  if (dist === null) fail(`cannot resolve @deepseek-ai/dsh-web-frontend/dist/index.html from ${dir}`)
   if (!existsSync(dist)) fail(`frontend dist missing: ${dist}`)
   console.log(`install-engine: verified ${bin}`)
   console.log(`install-engine: verified ${dist}`)
@@ -225,21 +277,42 @@ export function pruneForeignPrebuilds(dir) {
   }
 }
 
+/**
+ * Write `engine.json`. The version is read back from the installed tree rather
+ * than taken from the request: the checkout fallback installs whatever the
+ * checkout holds, so recording the requested version would make this file lie —
+ * and this file is the first thing to check when an update "did not take".
+ */
 function writeManifest(source, dir = ENGINE_DIR) {
-  writeFileSync(join(dir, 'engine.json'), `${JSON.stringify({ installedAt: new Date().toISOString(), source, packages: LOCKED }, null, 2)}\n`)
+  const packages = {}
+  const version = readInstalledVersion(dir)
+  if (version !== null) packages['@deepseek-ai/dsh'] = version
+  writeFileSync(join(dir, 'engine.json'), `${JSON.stringify({ installedAt: new Date().toISOString(), source, packages }, null, 2)}\n`)
+}
+
+/** Version of the dsh package inside an installed tree, or null. */
+function readInstalledVersion(dir) {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'))
+    return typeof manifest.version === 'string' ? manifest.version : null
+  } catch {
+    return null
+  }
 }
 
 function main() {
+  const version = resolveEngineVersion()
   const pm = packageManager()
   if (pm === null) fail(`neither npm nor pnpm is available on PATH (PATH=${process.env.PATH ?? ''}) — a packaged app needs its runtime-bin shims, see updater:apply`)
   console.log(`install-engine: package manager = ${pm}`)
+  console.log(`install-engine: engine version = ${version} (${process.env.DSH_ENGINE_VERSION === undefined ? 'factory default' : 'DSH_ENGINE_VERSION'})`)
 
   const existing = existsSync(ENGINE_DIR) && readdirSync(ENGINE_DIR).some((name) => name === 'node_modules')
   const target = existing ? STAGING_DIR : ENGINE_DIR
   rmSync(target, { recursive: true, force: true })
 
   let source = ''
-  if (installFromRegistry(target, pm)) {
+  if (installFromRegistry(target, pm, version)) {
     source = 'registry'
   } else if (installFromCheckout(target, pm)) {
     source = 'checkout'

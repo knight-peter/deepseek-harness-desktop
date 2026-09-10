@@ -62,6 +62,7 @@ contextBridge.exposeInMainWorld('dshDesktop', {
   // updater (Phase 5); force=true bypasses the engine-version cache
   engineVersion: (force = false) => ipcRenderer.invoke('updater:engine-version', force),
   backupHome: () => ipcRenderer.invoke('updater:backup'),
-  applyUpdate: () => ipcRenderer.invoke('updater:apply'),
+  // target: 'latest' = npm 最新版；'factory' = 回滚到出厂锁定版本
+  applyUpdate: (target) => ipcRenderer.invoke('updater:apply', target),
   probeUpdateSources: () => ipcRenderer.invoke('updater:probe-sources'),
 })

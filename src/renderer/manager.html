@@ -210,8 +210,9 @@
       <button id="version-check-btn">检查更新</button>
       <button id="backup-btn">备份 $DSH_HOME</button>
       <button id="engine-apply-btn" class="primary" hidden>应用引擎更新（重装 resources/engine）</button>
+      <button id="engine-rollback-btn" hidden>回滚到出厂引擎</button>
     </div>
-    <p class="muted">启动时自动检查引擎最新版本，确认有新版本后本节才会显示「应用引擎更新」按钮。建议先「备份 $DSH_HOME」（把 <code>~/.dsh</code> 的会话/设置/凭据/插件等全部数据复制到 <code>~/.dsh-backup-&lt;时间戳&gt;</code>，出问题可整体还原；只含数据，不含引擎程序）。</p>
+    <p class="muted">启动时自动检查引擎最新版本，确认有新版本后本节才会显示「应用引擎更新」按钮（升级到 npm 上的最新版，独立于应用版本）。升级到不兼容的新版导致引擎起不来时，用「回滚到出厂引擎」退回到随本应用发布的锁定版本。建议先「备份 $DSH_HOME」（把 <code>~/.dsh</code> 的会话/设置/凭据/插件等全部数据复制到 <code>~/.dsh-backup-&lt;时间戳&gt;</code>，出问题可整体还原；只含数据，不含引擎程序）。</p>
     <div id="update-result"></div>
   </section>
 

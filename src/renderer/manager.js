@@ -667,7 +667,16 @@ const engineVersionEl = document.getElementById('engine-version')
 const versionCheckBtn = document.getElementById('version-check-btn')
 const backupBtn = document.getElementById('backup-btn')
 const engineApplyBtn = document.getElementById('engine-apply-btn')
+const engineRollbackBtn = document.getElementById('engine-rollback-btn')
 const updateResult = document.getElementById('update-result')
+
+/**
+ * 引擎重装/回滚进行中。两个按钮走同一条 install-engine 流程、共用同一个
+ * staging 目录（resources/engine.new），并发点击会互相踩踏——所以不只禁用
+ * 被点的那个，而是整体互斥（`renderEngineUpdate` 也会尊重这个标志，
+ * 否则安装期间一次 `updater:engine-state` 推送就会把按钮重新点亮）。
+ */
+let engineOpInFlight = false
 
 /** 引擎更新区的操作结果（带颜色）。 */
 function setUpdateResult(text, kind) {
@@ -694,10 +703,21 @@ function renderEngineUpdate(info) {
   const updatable = isUpdatable(installed, latest)
   if (updatable) {
     engineApplyBtn.hidden = false
-    engineApplyBtn.disabled = false
+    engineApplyBtn.disabled = engineOpInFlight
     engineApplyBtn.textContent = `应用引擎更新（v${installed} → v${latest}）`
   } else {
     engineApplyBtn.hidden = true
+  }
+  // 回滚按钮：仅当当前引擎与出厂锁定版本不一致时出现（升过级 / 装过别的版本）。
+  // 出厂版本由主进程从 install-engine.mjs 读出，取不到时整个按钮不显示，
+  // 避免给出一个不知道该恢复到哪的入口。
+  const factory = info.factory
+  if (typeof factory === 'string' && installed !== null && factory !== installed) {
+    engineRollbackBtn.hidden = false
+    engineRollbackBtn.disabled = engineOpInFlight
+    engineRollbackBtn.textContent = `回滚到出厂引擎（v${installed} → v${factory}）`
+  } else {
+    engineRollbackBtn.hidden = true
   }
 }
 
@@ -736,13 +756,29 @@ backupBtn.addEventListener('click', async () => {
   }
 })
 
-engineApplyBtn.addEventListener('click', async () => {
-  setBtnBusy(engineApplyBtn, true)
-  setUpdateResult('正在重装引擎（npm install，可能耗时数分钟）…')
+/** 引擎重装/回滚的共用执行体：target 决定装哪个版本。 */
+async function runEngineApply(target, button, runningText, doneText) {
+  if (engineOpInFlight) return
+  engineOpInFlight = true
+  setBtnBusy(button, true)
+  engineApplyBtn.disabled = true
+  engineRollbackBtn.disabled = true
+  setUpdateResult(runningText)
   try {
-    const result = await api.applyUpdate()
+    const result = await api.applyUpdate(target)
     if (result.ok) {
-      setUpdateResult('引擎更新完成，已重启。', 'ok')
+      // 报出脚本回报的实际版本 + 主进程读回的已装版本：两者不一致说明
+      // 装进去的不是要装的那个（例如回落分支），不能只说「完成」。
+      const expected = result.targetVersion ?? '未知'
+      const actual = result.installed ?? '未知'
+      const mismatch = result.targetVersion !== null && result.targetVersion !== undefined
+        && result.installed !== result.targetVersion
+      setUpdateResult(
+        mismatch
+          ? `引擎操作已完成，但版本与目标不一致：目标 v${expected}，实际 v${actual}。请查看下方输出。\n${result.output.slice(-900)}`
+          : `${doneText}（已装 v${actual}）`,
+        mismatch ? 'warn' : 'ok',
+      )
       void api.engineVersion(true).then(renderEngineUpdate).catch(() => {})
     } else {
       const hint = result.output.includes('neither npm nor pnpm is available on PATH')
@@ -751,8 +787,19 @@ engineApplyBtn.addEventListener('click', async () => {
       setUpdateResult(`引擎更新失败（exit ${String(result.exitCode)}）：\n${result.output.slice(-1200)}${hint}`, 'err')
     }
   } finally {
-    setBtnBusy(engineApplyBtn, false)
+    engineOpInFlight = false
+    setBtnBusy(button, false)
+    engineApplyBtn.disabled = false
+    engineRollbackBtn.disabled = false
   }
+}
+
+engineApplyBtn.addEventListener('click', () => {
+  void runEngineApply('latest', engineApplyBtn, '正在更新引擎到 npm 最新版（npm install，可能耗时数分钟）…', '引擎更新完成，已重启')
+})
+
+engineRollbackBtn.addEventListener('click', () => {
+  void runEngineApply('factory', engineRollbackBtn, '正在回滚引擎到出厂版本（npm install，可能耗时数分钟）…', '引擎已回滚到出厂版本，已重启')
 })
 
 // ── 应用更新 ────────────────────────────────────────────────────────────────

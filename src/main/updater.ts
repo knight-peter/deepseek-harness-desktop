@@ -1,7 +1,7 @@
 /**
  * Engine update support (Phase 5): registry version check, installed-version
- * read, and `$DSH_HOME` backup. The actual engine swap reuses
- * `scripts/install-engine.mjs` (spawned by the caller). Electron-free.
+ * read, factory-version read, and `$DSH_HOME` backup. The actual engine swap
+ * reuses `scripts/install-engine.mjs` (spawned by the caller). Electron-free.
  * @module dsh-desktop/updater
  */
 
@@ -11,6 +11,24 @@ import { join } from 'node:path'
 export interface UpdaterOptions {
   engineDir: string
   dshHome: string
+}
+
+/**
+ * Factory engine version compiled into `scripts/install-engine.mjs`.
+ *
+ * Read from source instead of duplicated here on purpose: the script decides
+ * what "no DSH_ENGINE_VERSION" installs, so it is the only honest source for
+ * what the rollback button restores. A duplicated constant would silently
+ * drift the moment someone bumps the default.
+ */
+export function factoryEngineVersion(appPath: string): string | null {
+  try {
+    const source = readFileSync(join(appPath, 'scripts', 'install-engine.mjs'), 'utf8')
+    const match = /const DEFAULT_ENGINE_VERSION\s*=\s*'([^']+)'/.exec(source)
+    return match?.[1] ?? null
+  } catch {
+    return null
+  }
 }
 
 /** Latest published version of an engine package, or null when unreachable. */
