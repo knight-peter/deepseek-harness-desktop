@@ -54,8 +54,45 @@ export interface StartOptions {
   healthTimeoutMs?: number
 }
 
-/** The line `dsh web` prints once the server binds (`dsh web: http://127.0.0.1:<port>`). */
-const URL_LINE = /dsh web: (https?:\/\/127\.0\.0\.1:\d+)/
+/**
+ * The line `dsh web` prints once the server binds.
+ *
+ * Two shapes exist and both must be captured whole:
+ *   0.1.1-rc.2 → `dsh web: http://127.0.0.1:50026`
+ *   0.1.5-rc.1 → `dsh web: http://127.0.0.1:49636/?token=<secret>`
+ *
+ * The query string is NOT decoration: since 0.1.5 the server rejects
+ * unauthenticated requests to `/` with 401, and the token is what exchanges for
+ * the session cookie (see `probeHealthy`). Truncating it at the port — which
+ * this regex used to do — yields a URL that cannot be loaded by the window nor
+ * opened in an external browser.
+ */
+const URL_LINE = /dsh web: (https?:\/\/127\.0\.0\.1:\d+[^\s]*)/
+
+/**
+ * Fetch the engine page and report whether it is really serving.
+ *
+ * Engine ≥ 0.1.5 gates `/` behind a per-boot bearer token handed out on the
+ * URL line: `GET /?token=…` answers **303** with `Set-Cookie: dsh-auth-…`, and
+ * only a *subsequent* request carrying that cookie gets 200. Node's `fetch` has
+ * no cookie jar, so a plain `fetch(url)` follows the 303 to `/` and lands on
+ * 401 — the health check would fail on an engine that is perfectly healthy.
+ * Hence: take the first response manually, keep its cookies, then re-request.
+ * Pre-0.1.5 engines answer 200 directly and the redirect branch never runs.
+ */
+export async function probeHealthy(url: string): Promise<boolean> {
+  const first = await fetch(url, { redirect: 'manual' })
+  let response = first
+  if (first.status >= 300 && first.status < 400) {
+    const location = first.headers.get('location')
+    if (location !== null) {
+      const cookie = first.headers.getSetCookie().map((entry) => entry.split(';')[0]).join('; ')
+      response = await fetch(new URL(location, url).toString(), cookie === '' ? undefined : { headers: { cookie } })
+    }
+  }
+  if (!response.ok) return false
+  return (await response.text()).includes('__DSH_BOOT__')
+}
 
 export class Harness {
   private child: EngineProcess | null = null
@@ -197,9 +234,7 @@ export class Harness {
         throw new Error('harness: engine exited before the health check passed')
       }
       try {
-        const response = await fetch(url)
-        const body = await response.text()
-        if (response.ok && body.includes('__DSH_BOOT__')) return
+        if (await probeHealthy(url)) return
       } catch {
         // not listening yet
       }

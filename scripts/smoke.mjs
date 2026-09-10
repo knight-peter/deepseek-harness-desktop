@@ -16,7 +16,10 @@ const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const require = createRequire(import.meta.url)
 const electronBin = require('electron')
 
-const URL_LINE = /dsh web: (https?:\/\/127\.0\.0\.1:\d+)/
+// Captures the whole URL including any `?token=…` query: engine ≥ 0.1.5 serves
+// `/` only to requests carrying the cookie that token exchanges for, so a
+// port-only capture would 401 on a healthy engine (see probeHealthy below).
+const URL_LINE = /dsh web: (https?:\/\/127\.0\.0\.1:\d+[^\s]*)/
 
 function resolveBin() {
   if (process.env.DSH_ENGINE_BIN !== undefined) return process.env.DSH_ENGINE_BIN
@@ -64,7 +67,17 @@ async function main() {
   console.log(`smoke: engine URL = ${url}`)
 
   // Health check: HTTP 200 + __DSH_BOOT__ injection.
-  const response = await fetch(url)
+  // Engine ≥ 0.1.5 answers the token URL with a 303 that sets the session
+  // cookie; Node's fetch has no cookie jar, so follow it by hand — otherwise a
+  // healthy engine looks like a 401 failure.
+  const first = await fetch(url, { redirect: 'manual' })
+  let response = first
+  if (first.status >= 300 && first.status < 400) {
+    const location = first.headers.get('location')
+    if (location === null) fail(`GET / returned HTTP ${first.status} without a Location header`)
+    const cookie = first.headers.getSetCookie().map((entry) => entry.split(';')[0]).join('; ')
+    response = await fetch(new URL(location, url).toString(), cookie === '' ? undefined : { headers: { cookie } })
+  }
   const body = await response.text()
   if (!response.ok) fail(`GET / returned HTTP ${response.status}`)
   if (!body.includes('__DSH_BOOT__')) fail('page misses the __DSH_BOOT__ injection')
