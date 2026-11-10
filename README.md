@@ -23,6 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/knight-peter/deepseek-harness-deskt
 - **主窗口**：原版 `dsh web` 全部功能（对话、工具、设置等），启动后自动加载；关闭窗口即优雅停止引擎，无残留进程。
 - **管理窗口**（`Cmd/Ctrl + ,` 或主窗口「管理」按钮）：三个页签——**插件管理**（npm / 本地目录 / git 安装、版本列「最新 / 可更新」与一键更新、卸载）、**设置与更新**（应用更新检查/更新源、引擎版本检查/备份/重装，均有进度与结果反馈）、**开发调试**（开发功能合集：新建插件脚手架、开发模式引擎来源、引擎调试端口、引擎日志、配置树与 diff、补丁编辑器，页签顶部 `?` 有总帮助）。
 - **更新**：引擎更新（升级 dsh 本体，升级前自动备份数据）+ 应用更新（GitHub Releases + GitCode 国内镜像双源，自动下载、重启安装）。
+- **Office 能力**：文档侧栏可预览 docx/xlsx/pptx（包内自带 LibreOffice 转换，离线可用）；agent 可用包内自带的 Python（`python-docx`/`python-pptx`/`openpyxl` 等）创作与结构检查 Office 文档（随包 primary-runtime 载荷，见 [`docs/Electron基座应用开发.md`](docs/Electron基座应用开发.md) §2.11）。随包再分发的第三方组件许可见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
 更多使用细节（安装插件、更新、故障排查、卸载）见 **[`docs/使用总结.md`](docs/使用总结.md)**。
 
@@ -33,6 +34,7 @@ mise install              # 首次：按 mise.toml 装 Node 24 + pnpm 11（可�
 cp .env .env.local        # 可选：本机私有凭据模板（token 等），见 .env 底部注释
 pnpm install
 pnpm run install-engine   # 首次：把锁定版本引擎装进 resources/engine（registry，约 7 分钟）
+pnpm run prepare-primary-runtime  # 首次：组装 Office 载荷到 resources/runtime（国内网络先配镜像，见开发文档 §2.11）
 pnpm dev                  # 编译并启动（引擎从 resources/engine 或 DSH_CHECKOUT 解析）
 ```
 

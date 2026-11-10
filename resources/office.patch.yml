@@ -1,0 +1,23 @@
+# Office 技能叠加层（随包，asar 外）。
+# 把 `@deepseek-ai/dsh-tool-workspace-dependencies` 与 `@deepseek-ai/dsh-skill-office`
+# 挂进 web profile —— 不 fork 上游 bundle；由壳以 `--patch` 传入
+# （接线见 src/main/index.ts 的 engineCliArgs()，方案见 docs/plans/2026-10-01-Office转换与Python运行时实施方案.md）。
+#
+# 两个插件都通过 DSH_PRIMARY_RUNTIME（手动覆盖）或 DSH_BUNDLED_PRIMARY_RUNTIME
+# （壳随包注入）定位 primary runtime 载荷；两者都未设置时整体禁用——载荷缺失
+# 不影响引擎启动（验收：删掉 resources/runtime 后应用照常工作）。
+- insert:
+    - id: workspace-dependencies
+      name: '@deepseek-ai/dsh-tool-workspace-dependencies'
+      disabled: !!js "!(process.env.DSH_PRIMARY_RUNTIME ?? process.env.DSH_BUNDLED_PRIMARY_RUNTIME)"
+      config:
+        source: !!js "process.getBuiltinModule('node:path').resolve(process.env.DSH_PRIMARY_RUNTIME ?? process.env.DSH_BUNDLED_PRIMARY_RUNTIME ?? '')"
+    - id: skill-office
+      name: '@deepseek-ai/dsh-skill-office'
+      disabled: !!js "!(process.env.DSH_PRIMARY_RUNTIME ?? process.env.DSH_BUNDLED_PRIMARY_RUNTIME)"
+      config:
+        assetRoot: !!js "process.getBuiltinModule('node:path').resolve(process.env.DSH_PRIMARY_RUNTIME ?? process.env.DSH_BUNDLED_PRIMARY_RUNTIME ?? '', '..', 'office-skills')"
+        # python-only 载体：不注入 LibreOffice Kit CLI（上游 e2e 的 python-only-no-cli
+        # 模式）——Office→PDF 转换由已挂载的 office-to-pdf 提供；agent 直接用
+        # load_workspace_dependencies 返回的内置 Python + wheel 创作与检查文档。
+        cli: false

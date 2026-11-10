@@ -35,6 +35,14 @@ extraResources:
   # via `--require` under ELECTRON_RUN_AS_NODE.
   - from: resources/windows-hide.cjs
     to: windows-hide.cjs
+  # Office primary-runtime payload (prepare-primary-runtime): CPython + Office
+  # wheels + office-skills, all outside the asar — the interpreter is a native
+  # child-process payload that needs real file paths, exactly like the engine.
+  - from: resources/runtime
+    to: runtime
+  # Office skill overlay, passed to the engine with `--patch` (engineCliArgs).
+  - from: resources/office.patch.yml
+    to: office.patch.yml
 npmRebuild: false
 mac:
   category: public.app-category.developer-tools

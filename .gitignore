@@ -18,6 +18,9 @@ resources/node/
 resources/engine/
 resources/engine.new/
 resources/engine.old/
+# Office primary-runtime payload + its download cache (prepare-primary-runtime)
+resources/runtime/
+resources/downloads/
 
 # pnpm store created by install-engine (local cache)
 .pnpm-store/

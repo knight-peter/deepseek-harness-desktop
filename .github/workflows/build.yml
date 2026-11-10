@@ -53,6 +53,18 @@ jobs:
       - name: Install engine (registry, pinned)
         run: pnpm run install-engine
 
+      - name: Cache Office primary-runtime downloads
+        uses: actions/cache@v4
+        with:
+          path: resources/downloads
+          key: primary-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/primary-runtime.lock.json') }}
+
+      - name: Prepare Office primary runtime (CPython + Office wheels)
+        run: pnpm run prepare-primary-runtime
+
+      - name: Smoke Office primary runtime (isolated interpreter checks)
+        run: pnpm run smoke-primary-runtime
+
       - name: Rebuild engine native modules for Electron
         run: pnpm run rebuild-engine
 
@@ -61,6 +73,9 @@ jobs:
 
       - name: Engine smoke (Electron-as-Node boot + health + shutdown)
         run: pnpm run smoke
+
+      - name: Office capability smoke (overlay + payload end to end)
+        run: pnpm run smoke-office
 
       - name: Package (electron-builder → release/)
         # Explicit bash: the unset guards below are POSIX syntax, but Windows

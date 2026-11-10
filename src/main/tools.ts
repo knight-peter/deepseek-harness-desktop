@@ -15,6 +15,8 @@ export interface ToolsOptions {
   nodeCommand: string
   /** Extra Node CLI args before the script (e.g. `--require` preload). */
   nodeArgs?: string[]
+  /** Launcher-level CLI args after `--profile web` (e.g. `--patch <overlay>`). */
+  args?: string[]
   env: Record<string, string>
   profileDir: string
   dshHome: string
@@ -38,7 +40,7 @@ export class Tools {
 
   /** `dsh --profile web --dump-config`: the composed tree, no server booted. */
   dumpConfig(): { ok: boolean; output: string } {
-    const result = spawnSync(this.options.nodeCommand, ['--expose-internals', ...(this.options.nodeArgs ?? []), this.options.dshBin, '--profile', 'web', '--dump-config'], {
+    const result = spawnSync(this.options.nodeCommand, ['--expose-internals', ...(this.options.nodeArgs ?? []), this.options.dshBin, '--profile', 'web', ...(this.options.args ?? []), '--dump-config'], {
       env: this.options.env,
       encoding: 'utf8',
       timeout: 60_000,

@@ -53,7 +53,7 @@ Electron 的可执行文件本身是个 Node 运行时。设环境变量 `ELECTR
 ELECTRON_RUN_AS_NODE=1 ./dsh-desktop.app/Contents/MacOS/dsh-desktop script.js
 ```
 
-等于 `node script.js`，但用的是 **Electron 内嵌的那个 Node 版本**（Electron 43 → Node 24）。这是本项目的核心技巧：**引擎（上游 `dsh web`）作为子进程跑在 Electron 内嵌 Node 上**，用户机器零依赖——不用装 Node、不用装 pnpm。
+等于 `node script.js`，但用的是 **Electron 内嵌的那个 Node 版本**（Electron 44 → Node 24.18）。这是本项目的核心技巧：**引擎（上游 `dsh web`）作为子进程跑在 Electron 内嵌 Node 上**，用户机器零依赖——不用装 Node、不用装 pnpm。
 
 ### 0.5 electron-builder 与 electron-updater
 
@@ -79,7 +79,7 @@ dsh-desktop 是 DeepSeek Harness（下文简称「上游」，https://github.com
 
 | 组件 | 选择 | 说明 |
 |---|---|---|
-| 运行时 | Electron 43.x，**锁定 ≥ 40** | 内嵌 Node 24 满足引擎 engines `^22.19 \|\| >=24`；Electron 39 = Node 22 不满足（升级 Electron 时必须重新核对） |
+| 运行时 | Electron **44.0.0（精确锁定，不能写 `^44`）** | 内嵌 Node 24.18 满足引擎 engines `^22.19 \|\| >=24`（Electron 39 = Node 22 不满足）；**而且必须正好是白名单里那个构建**：引擎 ≥ 0.1.6-alpha.1 的原生 addon 只认精确 V8 指纹，`^44.0.0` 会解析到 44.5.1（V8 15.2.124.28 ≠ 15.2.124.13）照样起不来——详见 §2.1 |
 | 语言 | TypeScript（NodeNext ESM，strict） | 只编译 main 进程；preload 用 CJS、renderer 用原生 JS，**均不引框架**（渲染层极薄，刻意不用 electron-vite/React） |
 | 打包 | electron-builder 26.x | 三平台：mac dmg+zip / win nsis / linux AppImage |
 | 应用更新 | electron-updater | 壳自身更新走 GitHub Releases + GitCode 国内镜像（发布总结.md §4.4）；引擎更新走 install-engine 重装（§2.6） |
@@ -121,7 +121,13 @@ dsh-desktop/
 ├─ scripts/
 │  ├─ copy-static.mjs            # tsc 后把 preload/renderer 拷进 dist/
 │  ├─ install-engine.mjs         # 引擎安装/升级（§2.4）——本仓库最关键的脚本
-│  ├─ engine-update.mjs          # 引擎一步升级：查最新 → 改 LOCKED（不提交）→ install → rebuild → smoke（§2.4）
+│  ├─ engine-boot-check.mjs      # 引擎 boot/健康检查共享逻辑：install-engine 换装前 gate + smoke（§2.4/§2.8）
+│  ├─ prepare-primary-runtime.mjs # Office primary-runtime 载荷准备（§2.11）：锁源下载 + sha256 + 免 pip 解 wheel
+│  ├─ smoke-primary-runtime.mjs  # 载荷自检（解释器/五件套/check_office/pip check，§2.11）
+│  ├─ smoke-office.mjs           # Office 能力端到端（叠加层组合 + 引擎 boot + 创作/检查/转换全链，§2.11）
+│  ├─ primary-runtime.lock.json  # 载荷锁定清单（上游 lock.json 的 verbatim 副本，§2.11）
+│  ├─ primary-runtime-smoke.py   # 载荷 Python 自检脚本（上游 smoke.py 的 verbatim 副本，§2.11）
+│  ├─ engine-update.mjs          # 引擎一步升级：查最新 → 改 DEFAULT_ENGINE_VERSION（不提交）→ install → rebuild → smoke（§2.4）
 │  ├─ rebuild-engine.mjs         # @electron/rebuild 重编引擎原生模块（§2.3）
 │  ├─ smoke.mjs                  # 引擎冒烟：boot + 健康检查 + 优雅退出（§2.8）
 │  ├─ publish-release.mjs        # 发布 draft 为公开；--with-x64 补发 Intel x64 + 合并（发布总结.md §4.2）
@@ -131,7 +137,7 @@ dsh-desktop/
 │  └─ make-self-signed-cert.mjs  # 生成自签名 mac 签名证书并写 .env.local（README「macOS 签名」/发布总结.md §4.5）
 ├─ patches/                       # pnpm patchedDependencies：osx-sign walkAsync 串行化补丁（§1.2/发布总结.md §5）
 ├─ test/fixtures/hello-bundle/   # 插件全流程测试 fixture（§2.8 / dsh插件开发.md §5）
-├─ resources/                    # 运行期资源：windows-hide.cjs = Windows 隐藏控制台 preload（§2.9）；engine/ 引擎安装区（gitignore）
+├─ resources/                    # 运行期资源：windows-hide.cjs = Windows 隐藏控制台 preload（§2.9）；office.patch.yml = Office 技能叠加层（§2.11）；engine/ 引擎安装区与 runtime/ Office 载荷（均 gitignore）
 └─ release/                      # 打包产物（gitignore）：dmg/zip/.app 等
 ```
 
@@ -148,7 +154,7 @@ dsh-desktop/
 | AD-1 | 独立仓库，不放进上游仓库 | 上游持续更新，壳与源码彻底解耦 |
 | AD-2 | Electron 只做窗口壳；引擎是壳托管的 `dsh web` 子进程（`ELECTRON_RUN_AS_NODE=1`）；BrowserWindow 加载 `http://127.0.0.1:<随机端口>` | 复用原版 UI 零改动、进程隔离（§2.1/§2.2） |
 | AD-3 | 发布版引擎用 npm 发布包锁版本装在 `resources/engine`；包缺失时退化为「锁定 commit 构建 + npm pack」 | 开箱即用、升级只换引擎（§2.4） |
-| AD-4 | 引擎子进程用 Electron 内嵌 Node 运行；锁定 Electron ≥ 40（Node 24）；原生模块用 `@electron/rebuild` 重编 | 零额外运行时；风险与 `--expose-internals` 修复见 §2.1/§2.3 |
+| AD-4 | 引擎子进程用 Electron 内嵌 Node 运行；Electron **精确锁定 44.0.0**；原生模块用 `@electron/rebuild` 重编；**引擎换装前必须用真实运行时 boot 校验**（起不来就拒绝升级、保留旧引擎） | 零额外运行时；引擎原生 addon 只认精确 Electron/V8 指纹，故不能写 `^44`，且文件校验挡不住"装得上但起不来"（2026-10-01 事故，§2.1/§2.3/§2.4） |
 | AD-5 | 用户数据全部留在 `$DSH_HOME`，壳不迁移、不接管 | 与上游 CLI 共享数据 |
 | AD-6 | 插件安装/卸载/更新一律走上游 `dsh plugin` 命令，壳只编排重启 | 上游已实现 pnpm 安装 + bundles reconcile（§2.5） |
 | AD-7 | 结构变更（装/卸/更新插件）后自动重启引擎；配置变更走 profile patch HMR 热生效 | 配置 HMR 是配置级的，新行不一定能热挂载；引擎 boot 仅数秒 |
@@ -194,7 +200,23 @@ dsh-desktop/
 
 **日志**：stdout/stderr 按行缓冲后**双写**（控制台 `[engine:*]` 前缀 + `broadcast('harness:log')` 给所有窗口），同时进 500 行环形缓冲 `recentLogs`——晚开的管理窗口也能回放历史日志。
 
-> **为什么有 `--expose-internals`（本仓库最重要的实测发现，2026-08-14）**：Electron 内嵌 Node 下，上游 vendored loader 的原生 internals 钩子（node-addon-require-builtin）会**静默失效**，导致裸插件包名（如 `@deepseek-ai/cordis-plugin-timer`）解析失败、引擎 boot 报 `ERR_MODULE_NOT_FOUND`。加上 `--expose-internals` 后 loader 检测到该 execArg 走纯 `require` 回退路径。**所有跑引擎/CLI 的地方（harness、plugins、tools、smoke）都必须带这个 flag**——漏加的第一个症状就是裸插件名 `ERR_MODULE_NOT_FOUND`。
+> **为什么有 `--expose-internals`（2026-08-14 实测）**：Electron 内嵌 Node 下，上游 vendored loader 的原生 internals 钩子（node-addon-require-builtin）会**静默失效**，导致裸插件包名（如 `@deepseek-ai/cordis-plugin-timer`）解析失败、引擎 boot 报 `ERR_MODULE_NOT_FOUND`。加上 `--expose-internals` 后 loader 检测到该 execArg 走纯 `require` 回退路径。**所有跑引擎/CLI 的地方（harness、plugins、tools、smoke）都必须带这个 flag**——漏加的第一个症状就是裸插件名 `ERR_MODULE_NOT_FOUND`。
+>
+> ⚠️ **2026-10-01 更新：引擎 ≥ 0.1.6-alpha.1 换了 boot 方式，上面那条"回退路径"不再兜底——Electron 版本必须落在上游白名单里。**
+> 上游 `packages/boot/app-boot`（commit `6aa2e4633c`，随 **0.1.6-alpha.1** 首发）把 profile 解析拦截改成**无条件**调用 `node-addon-require-builtin`（不再看 `--expose-internals`，旧版 `@deepseek-ai/cordis-plugin-loader` 里那个 `execArgv.includes('--expose-internals')` 分支没了）。而该 addon 的预编译二进制内置一张**精确 V8 指纹白名单**，实测（从 npm 取 0.1.5/0.1.6/0.1.7 三个平台的 `.node` 反查字符串）为：
+>
+> | Electron | Node / V8 | addon 是否接受 |
+> |---|---|---|
+> | 43.0.0 | 24.17.0 / 15.0.245.13 | ✅ |
+> | **43.4.0（旧壳）** | 24.18.1 / **15.0.245.28** | ❌ 不认 |
+> | 44.0.0 | 24.18.1 / 15.2.124.13 | ✅ |
+> | 44.5.1 | 24.21.0 / 15.2.124.28 | ❌ 不认 |
+> | 45.0.0-alpha.6 | 24.21.0 / 15.4.80 | ✅ |
+>
+> 症状是引擎 boot 直接退出（应用起不来）：
+> `dsh: host preparation failed: node-addon-require-builtin unsupported: Unsupported/no-context (unsupported Electron runtime fingerprint: Node 24.18.1, V8 15.0.245.28-electron.0 (supported Electron versions: 43.0.0, 44.0.0, 45.0.0-alpha.6))`。
+> 已排除的错觉/弯路：① `--expose-internals` 并不能救——实测该 flag 下 5 个 internal 模块都能 `require`，但新 app-boot 根本不走纯 require 回退；② 降级 addon（0.1.5）也不行，它靠动态找 V8 符号，在 43.4.0 上报 `Unsupported/no-realm`；③ 上游自己的桌面端没事只是因为它的 lock 正好锁在 electron `44.0.0` + addon `0.1.6`，是"恰好配对"，不是兼容层。
+> **结论**：`package.json` 写死 `"electron": "44.0.0"`（与上游 desktop 锁的版本一致），升级 Electron / 升级引擎后都必须验证引擎能真起（§2.4 的换装前 boot 校验 + §2.8 的 smoke）。
 
 ### 2.2 引擎为什么不在 Electron 进程内嵌入
 
@@ -208,18 +230,23 @@ dsh-desktop/
 - 路径含 `prebuilt` 的**跳过**——N-API prebuilds ABI 稳定，跨 Node/Electron 通用，不用重编；
 - 其余用 `@electron/rebuild` 按当前 Electron 版本重编。
 
-**升级 Electron 大版本后必须重跑 `install-engine` + `rebuild-engine` + `smoke`。** 打包态（`updater:apply`）找不到 `electron-rebuild`（它是 devDependency，不随包发布）时，rebuild-engine 会打印说明并以 0 退出——registry 引擎的 N-API prebuilds 跨 ABI 稳定，可以安全跳过重编。
+**升级 Electron 大版本后必须重跑 `install-engine` + `rebuild-engine` + `smoke`，并跑一遍 `typecheck`（API/类型破坏会在这里现形）。** 打包态（`updater:apply`）找不到 `electron-rebuild`（它是 devDependency，不随包发布）时，rebuild-engine 会打印说明并以 0 退出——registry 引擎的 N-API prebuilds 跨 ABI 稳定，可以安全跳过重编。**注意 Electron 版本必须精确**（见 §2.1 的白名单表）。另外 `pnpm install` **不会**下载 Electron 二进制：`node_modules/electron` 的 npm 包既没有 `postinstall` 也不带 `dist/`，而是第一次 `require('electron')` 时惰性调用 `install.js` 补齐（`pnpm dev` / `pnpm run smoke` / install-engine 的 boot 校验都会触发；打印 `Downloading Electron binary...`）。所以这些命令要走 `pnpm run …`（脚本会加载 `.env.local` 里的 `ELECTRON_MIRROR`，§3.5），或手动 `node node_modules/electron/install.js`。
+
+> **43 → 44 的 API 破坏（2026-10-01 实测）**：Electron 44 把主进程 `clipboard` 改成**异步**（对齐 W3C：`readText(): Promise<string>`、`writeText(): Promise<void>`、`has()`、`read()`/`write()` 全是 Promise，没有 sync 变体）。旧的同步写法不会报错，只会静默坏掉——`ClipboardWatcher` 会把 Promise 当字符串比较，剪贴板变化永远不上报。本次已改：`clipboard.ts` 的轮询改 async + 首读建立基线（原来在 `start()` 里同步建基线）、`index.ts` 的「粘贴到焦点窗口」`await clipboard.readText()`、「复制链接地址」`void clipboard.writeText(...)`、IPC `clipboard:read-text` 直接返回 Promise（`ipcMain.handle` 原生支持）。**升级 Electron 时重点复查 `clipboard.*` 调用点**（`grep -rn "clipboard\." src/`）。
 
 ### 2.4 引擎安装与升级（install-engine.mjs）
 
 **这是本仓库最关键的脚本**。它把锁定版本的引擎装到 `resources/engine`：
 
-- **锁定版本**：文件顶部 `LOCKED` 常量（当前 `@deepseek-ai/dsh@0.1.1-rc.2` + `@deepseek-ai/dsh-web-frontend@0.0.1-rc.5`）。**升级引擎 = 改 LOCKED 后重跑脚本**（本地一条命令：`pnpm run engine-update`，见下）。两个包必须装在同一棵 node_modules——上游 `dsh-web-app` 用 `require.resolve('@deepseek-ai/dsh-web-frontend/dist/index.html')` 定位前端 dist。
+- **锁定版本**：文件顶部 `DEFAULT_ENGINE_VERSION` 常量（当前 `@deepseek-ai/dsh@0.2.0-rc.2`，与 npm `latest` 对齐）。**只有 `dsh` 一个版本轴**——web 前端通过 `dsh → dsh-web-app → dsh-web-frontend` 传递解析，别单独钉（单独钉会装出一棵用不到的副本，还把引擎拖到依赖方不共享的版本轴上）。**升级引擎 = 改它后重跑脚本**（本地一条命令：`pnpm run engine-update`，见下）。**这个常量必须是"能在这台壳的 Electron 上真起得来"的版本**：换装前 boot 校验（见下）会在 CI 拦住起不来的；同时它也必须是**新近发布**的版本——旧版本今天重装会按今天的 registry 解析依赖范围，2026-10-01 的两次事故正是这么来的：`0.1.5-rc.1` 把自己的子包浮动成 `0.1.5-rc.3`（版本错位树），而 `0.1.1-rc.2`（2026-09-10 还能跑通 smoke）今天已经根本起不来。
 - **安装路径**：主路径 npm registry；失败（断网/包缺失）时若有 `DSH_CHECKOUT` 环境变量，走兜底——在 checkout 里 `pnpm install && pnpm build`，对 `apps/cli`、`apps/web` `pnpm pack` 成 tarball 后安装（pnpm pack 会把 workspace: 依赖改写为具体版本）。**包管理器 pnpm 优先、npm 兜底**（2026-08-20 实测：npm 11 在代理/慢 registry 上解析 547 个依赖会长时间无输出地挂起——连接指向 fake-ip 网段 198.18.0.0/15 的代理时尤为明显；pnpm 并发下载 + 快速重试 + store 缓存，同一引擎约 30s 装完）。pnpm 分支会在安装目录写一个空 `pnpm-workspace.yaml`，避免 pnpm 向上找到本仓库的 workspace 配置后把引擎目录当 workspace 成员而空转；并传 `npm_config_strict_dep_builds=false`（pnpm 11 默认 strict=true 会因忽略构建脚本硬失败）。
-- **原子换装**：已存在引擎时先装进 `resources/engine.new` → 校验（dsh bin + 前端 dist/index.html 存在）→ rename 换入（旧引擎先改名 `.old`，换入失败自动回滚）→ 删除 `.old`。**中途失败不破坏旧引擎**。
+- **原子换装 + 换装前 boot 校验**：已存在引擎时先装进 `resources/engine.new` → 静态校验（dsh bin + 前端 dist/index.html 存在）→ **用真实运行时 boot 一次并确认它真的在服务**（URL 行 → `GET /` 拿到 `__DSH_BOOT__` 页面 → 再静置 3s 仍存活）→ 才 rename 换入（旧引擎先改名 `.old`，换入失败自动回滚）→ 删除 `.old`。**任何一步失败都不破坏旧引擎**（staging 目录直接丢弃）。boot 校验用临时 `$DSH_HOME`（不碰用户数据），跑的是 `scripts/engine-boot-check.mjs`——与 `smoke.mjs` 共用同一套 spawn/健康检查逻辑。
+  - 为什么必须"真 boot"而不只是查文件：上游引擎可以在 npm 上装得下来、却在壳的 Electron 上起不来（2026-10-01 指纹事故），或者**装出来是一棵版本错位的树**（见下）——两种情况都是"装好了、启动即死"，静态校验一个都挡不住。
+  - 为什么还要"静置 3s"：错位树会**先绑端口、先打印 URL**，然后在 profile 收尾阶段才崩（`user patch-layer watching requires the Cordis HMR service`）。只等 URL 会误判为通过。
+- **版本错位陷阱（2026-10-01 实测）**：`@deepseek-ai/dsh` 用 **caret 范围**声明自己的子包（`^0.1.5-rc.1`），而 npm 的预发布匹配规则只允许同一 `[major,minor,patch]` 的预发布版本，所以**装一个不是该元组最新预发布的版本，会把所有子包浮动到最新的同元组版本**：装 `dsh@0.1.5-rc.1` 实际得到 `dsh@0.1.5-rc.1` + `@deepseek-ai/dsh-app-boot@0.1.5-rc.3` + …（今天 rc.3 是最新）。这棵树能装、能起、能打印 URL，但会在 profile 收尾时崩。所以：**要装某个版本线就装它最新的预发布**（0.1.5 线 → `0.1.5-rc.3`），脚本会在装完后检查 `@deepseek-ai/dsh-*` 与 `dsh` 的版本一致性，漂移时打 WARNING 并把清单附在 boot 失败的诊断里（`engineVersionDrift()`，导出函数可直接测试）。
 - **prebuilds 剪枝**（`pruneForeignPrebuilds`，导出函数可直接测试）：删除 node_modules 里非当前平台的 `prebuilds/<platform>-<arch>/` 目录——node-pty 一家就省 ~58MB win32 二进制（引擎 352M → 294M）。保守策略：只有 `prebuilds/` 根内含当前平台目录时才剪，根级文件不碰。**多架构打包时设 `DSH_KEEP_ALL_PREBUILDS=1` 跳过剪枝**（CI mac 打包 x64+arm64 双架构：runner 是 arm64，若剪枝会剪掉 darwin-x64 的 prebuilds，打出的 Intel 包引擎原生模块缺失）。
 - 安装结果写 `resources/engine/engine.json`（时间、来源、版本），排查「升级没生效」先看它。
-- **一步升级（engine-update.mjs，仅本地）**：`pnpm run engine-update` = 默认查两个包的 npm latest → 改写 `LOCKED`（**不提交**，留在工作区待 review，`git diff scripts/install-engine.mjs`）→ `install-engine` → `rebuild-engine` → `smoke`。参数：`--no-bump` 跳过改 LOCKED、仅按当前版本重装（修复用）；`--version X` 显式钉 `@deepseek-ai/dsh` 版本（前端包仍跟随 latest）；`--dry-run` 只打印将改什么；`--no-smoke` 跳过冒烟。**CI 与打包应用不经过它**：CI 直接跑 install-engine/rebuild-engine/smoke 构建提交的 LOCKED，打包应用的 `updater:apply` 复用同一组脚本且绝不改动 asar 内 LOCKED。
+- **一步升级（engine-update.mjs，仅本地）**：`pnpm run engine-update` = 默认查 npm latest（只有 `@deepseek-ai/dsh` 一个版本轴；前端包跟随传递解析）→ 改写 `DEFAULT_ENGINE_VERSION`（**不提交**，留在工作区待 review，`git diff scripts/install-engine.mjs`）→ `install-engine` → `rebuild-engine` → `smoke`。参数：`--no-bump` 跳过改 DEFAULT_ENGINE_VERSION、仅按当前版本重装（修复用）；`--version X` 显式钉 `@deepseek-ai/dsh` 版本；`--dry-run` 只打印将改什么；`--no-smoke` 跳过冒烟。**CI 与打包应用不经过它**：CI 直接跑 install-engine/rebuild-engine/smoke 构建提交的 DEFAULT_ENGINE_VERSION，打包应用的 `updater:apply` 复用同一组脚本且绝不改动 asar 内 DEFAULT_ENGINE_VERSION。
 - 引擎目录在 `.gitignore`（构建期产物），本地和 CI 都先跑 install-engine 再打包（§3.1）。
 
 ### 2.5 插件管理管线（plugins.ts，壳侧）
@@ -288,7 +315,7 @@ PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engin
 
 **环境准备**：
 
-- **mise 管理工具版本**（`mise.toml`）：Node 锁 24.x（与 Electron 43 内嵌 Node 24 一致，满足 engines `>=22.19`，且保证 `node --env-file-if-exists`（≥22.9）可用）、pnpm 锁 10/11（与 CI 一致）。新环境：`mise install` 安装锁定版本，`mise use` 信任配置。
+- **mise 管理工具版本**（`mise.toml`）：Node 锁 24.x（与 Electron 44 内嵌 Node 24.18 一致，满足 engines `>=22.19`，且保证 `node --env-file-if-exists`（≥22.9）可用）、pnpm 锁 10/11（与 CI 一致）。新环境：`mise install` 安装锁定版本，`mise use` 信任配置。
 - 网络：GitHub 直连不稳时用 `ELECTRON_MIRROR=https://registry.npmmirror.com/-/binary/electron/` 下载 Electron 二进制（本机已配 `.env.local`，见 §3.5）。
 
 **配置分层（`.env` / `.env.development` / `.env.local`）**：需要凭据的脚本（build / publish-release / install-engine 等）通过 Node 原生 `--env-file-if-exists` **按序加载三层**（后覆盖前）：`.env`（配置总览，提交：共享真实值 `GH_OWNER`/`GH_REPO` + 底部附本机私有项注释模板）→ `.env.development`（开发覆盖，提交，如 `DSH_CHECKOUT` 约定路径）→ `.env.local`（本机私有，gitignore，token/证书/Apple ID），**无需每次 export**。`.env.local` 创建：复制 `.env` 底部「本机私有配置」注释段到 `.env.local` 取消注释填值（⚠️ 私有值绝不填进 `.env`，会随提交泄漏）。CI 无这些文件，`--env-file-if-exists` 静默跳过，继续用 secrets。已 export 的环境变量优先于文件值。**`pnpm dev` 刻意不读 env 文件**——日常启动零配置依赖（clone 下来直接能跑），否则残留配置（如过期的 `DSH_ENGINE_BIN`）会导致启动失败且难以排查。**仓库归属类变量（GitHub owner/repo）不硬编码在代码里**：`electron-builder.yml` 的 publish 用 `${env.GH_OWNER}`/`${env.GH_REPO}` 宏读取，统一由 `.env` 提供。
@@ -298,8 +325,11 @@ PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engin
 | 命令 | 作用 | 何时跑 |
 |---|---|---|
 | `pnpm install` | 装壳依赖 | 首次 / 改依赖 |
-| `pnpm run engine-update` | 一条命令升级引擎：查最新 → 改 `LOCKED`（不提交）→ install → rebuild → smoke（`--no-bump` 仅重装、`--version X` 显式版本、`--dry-run` 预览、`--no-smoke` 跳过冒烟） | 升级引擎版本（本地，§2.4） |
+| `pnpm run engine-update` | 一条命令升级引擎：查最新 → 改 `DEFAULT_ENGINE_VERSION`（不提交）→ install → rebuild → smoke（`--no-bump` 仅重装、`--version X` 显式版本、`--dry-run` 预览、`--no-smoke` 跳过冒烟） | 升级引擎版本（本地，§2.4） |
 | `pnpm run install-engine` | 装锁定版本引擎到 resources/engine（registry 主路径，首次约 7 分钟） | 首次、升级引擎、CI |
+| `pnpm run prepare-primary-runtime` | 组装 Office 载荷到 resources/runtime（sha256 锁定下载，§2.11；镜像见该节） | 首次、升级引擎后、CI |
+| `pnpm run smoke-primary-runtime` | 载荷自检（解释器 + 五件套 + check_office + pip check） | 动过载荷/lock 后 |
+| `pnpm run smoke-office` | Office 能力端到端（叠加层 + boot + 创作/检查/转换） | 动过 office 接线后 |
 | `pnpm run rebuild-engine` | 重编引擎原生模块 | 换 Electron 版本后 |
 | `pnpm run smoke` | 引擎冒烟（Electron-as-Node boot + 健康检查 + 优雅退出） | 动过引擎/安装逻辑后 |
 | `pnpm dev` | compile + 启动壳（状态壳 → 自动加载引擎 UI） | 日常开发 |
@@ -315,13 +345,15 @@ PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engin
 - pnpm 报 `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY` 或 `ERR_PNPM_OUTDATED_LOCKFILE` → `CI=true pnpm install --no-frozen-lockfile`。
 - 启动秒退、无任何日志（exit 0）→ 单实例锁被残留实例占着：`pkill -f dsh-desktop` 后重试。
 - 引擎 boot 报裸插件包名 `ERR_MODULE_NOT_FOUND` → `--expose-internals` 漏加（§2.1）。
+- 引擎 boot 报 `node-addon-require-builtin unsupported: Unsupported/no-context ... unsupported Electron runtime fingerprint` → 壳的 Electron 不在上游白名单里（§2.1）：引擎 ≥ 0.1.6-alpha.1 只认 Electron 43.0.0 / 44.0.0 / 45.0.0-alpha.6。修复：`"electron": "44.0.0"`（精确）后重装引擎；`install-engine` 的换装前 boot 校验会先拒绝这种引擎，不会再把能用的引擎换坏。
+- 引擎打印了 `dsh web: http://127.0.0.1:<port>` 却立刻退出（`user patch-layer watching requires the Cordis HMR service`）→ 引擎树**版本错位**（§2.4）：`dsh@x.y.z-rc.a` 配 `@deepseek-ai/dsh-*@x.y.z-rc.b`。修复：装该版本线**最新的预发布**（如 0.1.5 线用 `DSH_ENGINE_VERSION=0.1.5-rc.3`）。
 - `electron .` 无窗口无日志 → 检查是否有第二个实例/开发目录路径。
 - 打包崩溃 `Cannot read properties of undefined (reading 'ReadWrite')` → `@electron/get` 覆盖被移除（§1.2）。
 - 打包/`pnpm list` 报 `ERR_SQLITE_ERROR: unable to open database file`（electron-builder 的 node-module-collector 阶段失败）→ **pnpm 全局 store 的 `index.db` 损坏**（本机 `~/Library/pnpm/store/v11/index.db`，异常中断写坏）。修复：备份该文件（`mv index.db index.db.bak`）后 pnpm 自动重建索引（2026-08-17 实测）。**注意**：这不是 electron-builder 的 bug，是 pnpm 环境问题；`pnpm list --depth 0` 可快速复现判断。
 
 ### 2.8 测试与验证
 
-**smoke.mjs**：用 `require('electron')` 拿 Electron 二进制，按壳完全相同的参数（`--expose-internals` + `--profile web --port 0` + `--no-open` + `ELECTRON_RUN_AS_NODE=1`）boot 引擎，断言：URL 行 60s 内出现 → HTTP 200 → 页面含 `__DSH_BOOT__` → SIGTERM 后 10s 内干净退出（code 0 或 signal SIGTERM）。**任何引擎相关改动后跑它。**
+**smoke.mjs**：按壳完全相同的参数（`--expose-internals` + `--profile web --port 0` + `--no-open` + `ELECTRON_RUN_AS_NODE=1`）boot 引擎，断言：URL 行 60s 内出现 → `GET /` 跟完 0.1.5 的 token 303 拿到 HTTP 200 + `__DSH_BOOT__` → SIGTERM 后 10s 内干净退出（code 0 或 signal SIGTERM）。**任何引擎相关改动后跑它。** spawn/URL/健康检查都在 `scripts/engine-boot-check.mjs`（与 install-engine 的换装前 gate 共用；flag 漏加/参数写错只需改一处）。`DSH_ELECTRON_BIN` 指定运行时（默认：打包态=自己的 Electron 二进制；dev/CI=工作区 `electron` devDependency），`DSH_ENGINE_BIN` 指定引擎入口。**失败必带引擎 stderr 尾部**，不再只报"fetch failed"。
 
 **插件全流程（test/fixtures/hello-bundle）**：验证「壳的插件管线没被上游机制变化打破」的最小回归：`dsh plugin --profile web add file:<fixture 绝对路径>` → profile manifest 的 bundles 自动 reconcile（`[dsh-base, dsh-web-app, dsh-hello-bundle]`）→ 重启引擎 → 日志出现 `[hello-bundle] mounted` → `remove` 后 bundles 恢复原状（2026-08-16 实测通过）。fixture 结构即最小 bundle 插件范例（见 dsh插件开发.md §3）。
 
@@ -332,7 +364,7 @@ PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engin
 | 改动 | 必跑 |
 |---|---|
 | main 逻辑（harness/plugins/tools/config/updater） | `typecheck` + `lint` + `dev` 手测 |
-| 引擎安装/升级逻辑、`LOCKED` 版本 | `engine-update`（或 `install-engine` + `smoke`；再打包产物实机 boot） |
+| 引擎安装/升级逻辑、`DEFAULT_ENGINE_VERSION` 版本 | `engine-update`（或 `install-engine` + `smoke`；再打包产物实机 boot） |
 | 打包配置（electron-builder.yml） | `build` + 打开产物验证（`.app` 直跑：`release/mac/dsh-desktop.app/Contents/MacOS/dsh-desktop`） |
 | preload / renderer | `compile` 后 `dev` 手测两个窗口 |
 | 插件机制相关 | 插件全流程 fixture（§2.8 / dsh插件开发.md §5） |
@@ -354,6 +386,46 @@ PATH 前置 runtime-bin 后，`dsh plugin` 和 `updater:apply` 的 install-engin
 - `windowsHide` 只隐藏窗口，**不消灭进程**：npm/pnpm 残留子进程仍存在（不可见），极端情况仍占资源。
 - 已知边角：`windowsHide` + `stdio: 'inherit'` 有上游 issue（nodejs/node#17824），Windows 实机验收重点确认 pnpm/命令输出仍被正常捕获。
 - 本机（mac）已验证：preload 的 win32 分支可用 `Object.defineProperty(process, 'platform', { value: 'win32' })` 模拟 + 包装原函数断言；ESM 互操作、参数形态（含 `spawn(cmd, undefined, opts)` 边界）、幂等、darwin 无操作均已实测。Windows 打包版实机验收待 Windows 上执行。
+
+### 2.11 Office 能力（LibreOffice 转换 + Python office 技能）
+
+产物里有两条独立的 Office 能力线（实施方案：docs/plans/2026-10-01-Office转换与Python运行时实施方案.md；spike 结论同文件 §七）：
+
+| 线 | 组成 | 状态 |
+|---|---|---|
+| **Office → PDF/PNG**（LibreOffice） | 引擎 web profile 自带 `office-to-pdf` 插件 + npm 平台包 `@deepseek-ai/libreoffice-kit-<platform>`（约 150 MB 原生引擎随包；Linux 走 `-wasm`） | 随引擎 0.2.0-rc.2 自动获得，无需配置 |
+| **Office 创作与结构检查**（Python） | **primary-runtime 载荷**（CPython 3.12.14 + 13 个锁定 wheel）+ `resources/office.patch.yml` 叠加层挂 `workspace-dependencies` + `skill-office` | 由本仓库构建/接线（本节） |
+
+**载荷布局**（与上游 deepseek-harness 同构，`skill-office` 按 `<payload>/../office-skills` 找资产）：
+
+```
+resources/runtime/                     # gitignore，构建期产物
+├─ primary-runtime/
+│  ├─ runtime.json                     # desktopVersion/platform/arch/python/pythonPackages/payloadDigest
+│  └─ dependencies/python/             # astral python-build-standalone（install_only_stripped）
+│     ├─ bin/python3
+│     └─ lib/python3.12/site-packages/ # 13 个 sha256 锁定 wheel，免 pip 解包（fflate）
+└─ office-skills/                      # 从 resources/engine 的 dsh-skill-office/assets 复制
+```
+
+**构建与验证**：
+
+- `pnpm run prepare-primary-runtime`：按本机平台下载并组装载荷（`--target X` 交叉；`--full` 额外带 Node+pnpm，默认 python-only）。**sha256 全量校验**（`scripts/primary-runtime.lock.json` = 上游 lock 的 verbatim 副本）；缓存进 `resources/downloads`。
+- `pnpm run smoke-primary-runtime`：载荷自检（解释器 + numpy/pandas + 五件套版本 + `check_office.py` + `pip check`）；`scripts/primary-runtime-smoke.py` 是上游 smoke.py 的 verbatim 副本。
+- `pnpm run smoke-office`：**发货级**端到端——叠加层组合检查（`--dump-config`）→ 引擎带 env+patch 真启动 → 载荷 Python 生成 docx → `check_office.py` → 自带 LibreOffice 转 PDF。
+- **镜像**（国内网络，GitHub 直连 ~4 KB/s 实测）：`DSH_PRIMARY_RUNTIME_PYTHON_MIRROR=https://registry.npmmirror.com/-/binary/python-build-standalone/`、`DSH_PRIMARY_RUNTIME_WHEEL_MIRROR=https://pypi.tuna.tsinghua.edu.cn/`、`DSH_PRIMARY_RUNTIME_NODE_MIRROR=https://registry.npmmirror.com/-/binary/node/`。镜像只换 URL 前缀，字节与 sha256 不变；**默认仍走官方源，CI（GitHub runner）无需设置**。
+
+**运行期接线**（壳侧，`src/main/index.ts`）：
+
+- `engineNodeEnv()`：payload 存在时注入 `DSH_BUNDLED_PRIMARY_RUNTIME=<Resources>/runtime/primary-runtime`；`resources/office.patch.yml` 里的 `!!js` 表达式在**引擎自身 boot 进程**里解析它（引擎给子进程擦除 DSH_* 变量不影响——插件在进程内已解析成绝对路径）。
+- `engineCliArgs()`：overlay 存在时给引擎加 `--patch <绝对路径>`。**位置铁律**（spike 实测）：启动器选项必须在 `--profile web` 之后、app-args（`--port`/`--no-open`）**之前**，否则 `error: unknown option '--patch'`；`nodeArgs` 是 Node 级参数（在脚本之前），不能复用，所以 `harness.start()` 有独立的 `args` 通道；`tools()`（dump-config）同样带上；**`dsh plugin` 不带**（pnpm 参数通道）。
+- **降级**：overlay 里两个插件都带 `disabled: !env` 表达式——删掉 `resources/runtime`（如 dev 未准备载荷）引擎照常启动，只是没有 office 技能；LibreOffice 转换不受影响。
+
+**生命周期注意**：
+
+- 载荷与引擎**同生命周期但分开更新**：应用内「引擎更新」（`updater:apply`）只换 `resources/engine`，不动 `resources/runtime`。office-skills 是打包时从当版引擎复制的——新引擎的 skill 代码配旧资产，目前格式稳定（SKILL.md + frontmatter），但升级引擎后应重新 `prepare-primary-runtime`（CI 每次都现做）。
+- 体积：载荷解包后 ~247 MB（x64），dmg 预计 +80~100 MB；许可见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)（CPython PSF + 13 wheel + LibreOffice MPL-2.0）。
+- **坑**：wheel 解包曾用 `extract-zip@2.0.1`，它在 **Node ≥ 25 下 Promise 不 settle、进程静默 exit 0**（Node 24 正常，CI/上游无感）——已改用纯 JS 的 `fflate`，任何 Node 版本可用。
 
 ### 2.10 右键上下文菜单（context-menu）
 
@@ -384,14 +456,16 @@ mise install              # 1. 工具链：按 mise.toml 装 Node 24 + pnpm（�
 cp .env .env.local        # 2. 可选：本机私有凭据模板（token / 证书 / Apple ID 等）
 pnpm install              # 3. 壳依赖（内置 pnpm 随之装进 node_modules，打包时进 asar）
 pnpm run install-engine   # 4. 生成 resources/engine（registry 拉锁定版本，约 7 分钟）
-pnpm run rebuild-engine   # 5. 可选：非 N-API 原生模块按当前 Electron ABI 重编（升级 Electron 大版本后必跑）
-pnpm run smoke            # 6. 可选：引擎 boot 冒烟（动过引擎/安装逻辑后跑）
-pnpm build                # 7. 打包当前平台、当前架构产物到 release/
+pnpm run prepare-primary-runtime  # 5. 生成 resources/runtime（Office 载荷，§2.11；国内网络先配该节的镜像 env）
+pnpm run rebuild-engine   # 6. 可选：非 N-API 原生模块按当前 Electron ABI 重编（升级 Electron 大版本后必跑）
+pnpm run smoke            # 7. 可选：引擎 boot 冒烟（动过引擎/安装逻辑后跑）
+pnpm run smoke-office     # 8. 可选：Office 能力端到端（叠加层 + boot + 创作/检查/转换）
+pnpm build                # 9. 打包当前平台、当前架构产物到 release/
 ```
 
-**升级已有引擎版本**：用 `pnpm run engine-update` 一条命令代替上面第 4~6 步（查最新 → 改 LOCKED → install → rebuild → smoke，改完 review 未提交的 LOCKED diff）。首次 / 换机器仍按 4~6 原样跑——`engine-update` 默认会查 npm 并可能改写 LOCKED，不适合初始化场景。
+**升级已有引擎版本**：用 `pnpm run engine-update` 一条命令代替上面第 4~8 步（查最新 → 改 DEFAULT_ENGINE_VERSION → install → rebuild → smoke，改完 review 未提交的 DEFAULT_ENGINE_VERSION diff）。首次 / 换机器仍按 4~9 原样跑——`engine-update` 默认会查 npm 并可能改写 DEFAULT_ENGINE_VERSION，不适合初始化场景。
 
-> ⚠️ **`pnpm build` 不会安装引擎**：electron-builder 的 `extraResources` 只是把 `resources/engine` **原样拷进应用包**，不会帮你拉依赖。换机器 / 清了 `resources/` / 引擎版本变了却跳过第 4 步，直接 build 打出的应用**没有引擎**，启动会弹「未找到 dsh 引擎」。
+> ⚠️ **`pnpm build` 不会安装引擎**：electron-builder 的 `extraResources` 只是把 `resources/engine` **原样拷进应用包**，不会帮你拉依赖。换机器 / 清了 `resources/` / 引擎版本变了却跳过第 4 步，直接 build 打出的应用**没有引擎**，启动会弹「未找到 dsh 引擎」。同理**也不会准备 Office 载荷**（第 5 步）——缺载荷时应用照常启动，只是没有 Python office 技能（叠加层自动禁用，§2.11）。
 
 **只改壳代码（`src/`）时**：第 1~4 步不用重跑，直接 `pnpm build`（内部已含 compile）即可。
 
@@ -400,10 +474,12 @@ pnpm build                # 7. 打包当前平台、当前架构产物到 releas
 | 命令 | 作用 | 何时跑 |
 |---|---|---|
 | `pnpm build` | compile + electron-builder 出**当前平台、当前架构**产物到 `release/`（本机 Intel Mac → x64 dmg/zip） | 打本地自测包；签名/公证凭据从 env 三层文件自动加载（§2.7），无凭据则跳过 |
-| `pnpm run engine-update` | 一条命令升级引擎：查最新 → 改 `LOCKED` → install → rebuild → smoke（`--no-bump` 仅按当前重装） | 升级引擎版本（本地，§2.4） |
+| `pnpm run engine-update` | 一条命令升级引擎：查最新 → 改 `DEFAULT_ENGINE_VERSION` → install → rebuild → smoke（`--no-bump` 仅按当前重装） | 升级引擎版本（本地，§2.4） |
 | `pnpm run install-engine` | 装锁定版本引擎到 resources/engine（registry 主路径，首次约 7 分钟） | 首次、升级引擎、换机器 |
+| `pnpm run prepare-primary-runtime` | 组装 Office 载荷到 resources/runtime（sha256 锁定下载 + 免 pip 解 wheel，§2.11） | 首次、升级引擎后、CI |
 | `pnpm run rebuild-engine` | 重编引擎非 N-API 原生模块 | 换 Electron 大版本后 |
 | `pnpm run smoke` | 引擎冒烟（Electron-as-Node boot + 健康检查 + 优雅退出） | 动过引擎/安装逻辑后 |
+| `pnpm run smoke-primary-runtime` / `smoke-office` | 载荷自检 / Office 能力端到端（§2.11） | 动过载荷、office 接线后 |
 | `pnpm run compile` | 只编译不打包（tsc + 拷静态到 dist/） | 只改 main/preload/renderer 想快速手测 |
 
 完整命令表见 §2.7。⚠️ **别用 `pnpm pack`**：那是 pnpm 内置命令（等价 `npm pack`，打 tarball），不会执行本项目的打包脚本。
@@ -467,7 +543,7 @@ pnpm build                # 7. 打包当前平台、当前架构产物到 releas
 
 | 任务 | 步骤 |
 |---|---|
-| 升级引擎版本 | `pnpm run engine-update`（默认查 npm latest 并改写 `LOCKED`，`--no-bump` 仅按当前重装）→ review 未提交的 LOCKED diff（`git diff scripts/install-engine.mjs`）→ 提交 → 发版 |
+| 升级引擎版本 | `pnpm run engine-update`（默认查 npm latest 并改写 `DEFAULT_ENGINE_VERSION`，`--no-bump` 仅按当前重装）→ review 未提交的 DEFAULT_ENGINE_VERSION diff（`git diff scripts/install-engine.mjs`）→ 提交 → 发版 |
 | 升级 Electron | 改 package.json 版本 → `CI=true pnpm install --no-frozen-lockfile` → 核对内嵌 Node 满足引擎 engines（≥ 40 = Node 24）→ `rebuild-engine` → `smoke` |
 | 新增管理窗口功能 | 后端放 electron-free 模块（路径注入）→ index.ts 加 IPC handler → preload.cjs 加桥方法 → manager.html/js 加控件 |
 | 出正式发布物 | 见「四、发布」与 docs/发布总结.md（`release` → CI → `publish-release` → `sync-domestic`） |

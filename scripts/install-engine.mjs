@@ -14,6 +14,16 @@
  * verification — a failed install leaves the old engine untouched
  * (Phase 5 acceptance: 模拟升级失败不破坏旧引擎).
  *
+ * Boot gate (2026-10-01): "verified" is not just "the files exist". The staged
+ * tree is booted as `dsh web` under the **real shell runtime** (the packaged
+ * app's own Electron binary; the workspace Electron in dev/CI) before the swap.
+ * Engine ≥ 0.1.6-alpha.1 resolves profile packages through the prebuilt
+ * `node-addon-require-builtin` addon, whose native binary only accepts specific
+ * Electron builds; without this gate such an engine installs cleanly from npm
+ * and then dies at startup — which is exactly how a healthy app was replaced by
+ * one that could not start. `DSH_SKIP_BOOT_CHECK=1` bypasses the gate (loudly)
+ * for emergency repairs; see `scripts/engine-boot-check.mjs`.
+ *
  * Package manager: pnpm first, npm as fallback (why: npm 11 stalls for
  * minutes on slow/proxy registries with zero output; pnpm fetches
  * concurrently, retries fast and reuses its store — see packageManager()).
@@ -32,6 +42,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, s
 import { createRequire } from 'node:module'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createTempDshHome, EngineBoot, engineRuntimeBin, originOfUrl, waitForHealthyPage } from './engine-boot-check.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const ENGINE_DIR = process.env.DSH_ENGINE_DIR !== undefined
@@ -41,10 +52,50 @@ const STAGING_DIR = `${ENGINE_DIR}.new`
 const ENGINE_MANIFEST = join(ENGINE_DIR, 'engine.json')
 
 /**
- * Factory default engine version (registry state verified 2026-08-31).
+ * How long the staged engine gets to print its URL line. Measured on this
+ * machine: ~7-11s for a cold boot into a scratch `$DSH_HOME`; CI runners are
+ * slower and a first boot may still compile/scan caches, so the budget is
+ * generous — a failure caused by an incompatible native addon exits in <1s and
+ * is reported immediately (the check fails fast on early exit).
+ */
+const BOOT_TIMEOUT_MS = 120_000
+
+/**
+ * How long the engine gets to answer `GET /` with the `__DSH_BOOT__` page
+ * after printing its URL, and how long it must then stay alive.
+ *
+ * A URL line alone is not proof: `@deepseek-ai/dsh@0.1.5-rc.1` installed today
+ * floats its subpackages to `0.1.5-rc.3` (npm ranges allow it), and that
+ * incoherent tree binds the port, prints the URL, then dies in profile
+ * settlement (`user patch-layer watching requires the Cordis HMR service`,
+ * 2026-10-01). Requiring one served page *plus* a quiet settle window catches
+ * both that case and the fingerprint case that exits before any URL.
+ */
+const HEALTH_TIMEOUT_MS = 30_000
+const SETTLE_MS = 3_000
+
+/**
+ * Factory default engine version (registry state verified 2026-10-09).
  * Used when no version is passed (CI, first install, offline) — the packaged
  * app's `updater:apply` passes DSH_ENGINE_VERSION with the npm `latest` it
  * already shows in the UI, so an in-app engine update really moves forward.
+ *
+ * 0.2.1-alpha.1 is the newest published harness release (2026-10-03): it sits
+ * on npm's `alpha` tag while `latest`/`next` still point at 0.2.0-rc.2 — the
+ * version the previous app build shipped. The pin intentionally follows the
+ * newest *release*, not the `latest` tag; the pre-swap boot gate below is what
+ * makes that safe (it refuses any tree that does not serve a healthy page on
+ * this shell's Electron).
+ *
+ * This must stay a version that **boots on the Electron pinned in
+ * package.json** (the pre-swap boot gate enforces it in CI). It also has to be
+ * a *fresh* pin: reinstalling an old version today resolves its dependency
+ * ranges against today's registry, and the 2026-10-01 incident showed both
+ * ways that drifts — `0.1.5-rc.1` floats its own subpackages to `0.1.5-rc.3`
+ * (mixed tree) and `0.1.1-rc.2`, which passed smoke on 2026-09-10, no longer
+ * boots at all. Verified 2026-10-09: coherent tree + boot gate + smoke on
+ * Electron 44.0.0 (darwin-x64); `pnpm run engine-update` re-verifies it
+ * whenever the pin moves.
  *
  * Only `dsh` is pinned: the web frontend resolves transitively through
  * dsh → dsh-web-app → dsh-web-frontend, so pinning it separately would put a
@@ -52,7 +103,7 @@ const ENGINE_MANIFEST = join(ENGINE_DIR, 'engine.json')
  * axis its own dependents do not share. See `verify()` for the resolution
  * anchor that this relies on.
  */
-const DEFAULT_ENGINE_VERSION = '0.1.1-rc.2'
+const DEFAULT_ENGINE_VERSION = '0.2.1-alpha.1'
 
 function fail(message) {
   console.error(`install-engine: ${message}`)
@@ -219,6 +270,57 @@ function verify(dir) {
 }
 
 /**
+ * Boot the staged tree under the real shell runtime, before it is swapped in.
+ *
+ * A file check cannot see runtime incompatibilities — the reason the engine
+ * update of 2026-10-01 replaced a working engine with one that exits during
+ * boot (`node-addon-require-builtin` accepts only an exact Electron V8
+ * fingerprint per build; see `engine-boot-check.mjs`). The boot uses a scratch
+ * `$DSH_HOME`: the gate must neither read nor write user data, and an empty
+ * home reaches the same boot path (the engine creates `profiles/web` itself).
+ *
+ * @returns `null` when the engine boots, else the failure detail for `fail()`.
+ * Exported for testing (same reason as `resolveFrontendDist`): the gate can be
+ * pointed at any installed tree and any runtime via `DSH_ELECTRON_BIN` without
+ * paying for an install.
+ */
+export async function verifyBoot(dir) {
+  if (process.env.DSH_SKIP_BOOT_CHECK === '1') {
+    console.warn('install-engine: WARNING — DSH_SKIP_BOOT_CHECK=1, the staged engine was NOT boot-verified')
+    return null
+  }
+  const dshBin = join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  let runtimeBin
+  try {
+    runtimeBin = engineRuntimeBin()
+  } catch (error) {
+    return `cannot resolve the Electron runtime to boot-check against: ${error instanceof Error ? error.message : String(error)}`
+  }
+  const scratch = createTempDshHome()
+  let boot = null
+  try {
+    boot = new EngineBoot({ dshBin, home: scratch.path })
+    const url = await boot.waitForUrl(BOOT_TIMEOUT_MS)
+    const page = await waitForHealthyPage(url, HEALTH_TIMEOUT_MS)
+    if (!page.ok) {
+      return `staged engine started but never served a healthy page (${page.reason})\n${boot.diagnostic()}`
+    }
+    if (!(await boot.stayedUp(SETTLE_MS))) {
+      const exit = boot.exit
+      return `staged engine served a page but exited right after (code=${String(exit?.code)} signal=${String(exit?.signal)})\n${boot.diagnostic()}`
+    }
+    console.log(`install-engine: verified boot on ${runtimeBin} (${originOfUrl(url)} + __DSH_BOOT__)`)
+    return null
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return `staged engine does not boot on this shell's runtime (${runtimeBin})\n${detail}`
+  } finally {
+    if (boot !== null) await boot.stop()
+    scratch.cleanup()
+  }
+}
+
+/**
  * Drop foreign-platform prebuilds (node-gyp-build layout:
  * `prebuilds/<platform>-<arch>/`). node-pty alone ships ~58MB of win32
  * binaries that this tree will never load. Conservative: a `prebuilds` root
@@ -300,7 +402,48 @@ function readInstalledVersion(dir) {
   }
 }
 
-function main() {
+/**
+ * Subpackages of the installed engine whose version differs from `dsh`'s.
+ *
+ * `dsh` depends on its own `@deepseek-ai/dsh-*` packages through **caret
+ * ranges** (`^0.1.5-rc.1`), and npm only lets a prerelease satisfy a range
+ * whose comparator shares its `[major,minor,patch]` tuple — so installing an
+ * older pin today floats every subpackage to the newest prerelease of that
+ * same tuple — e.g. `dsh@0.1.5-rc.1` with `dsh-app-boot@0.1.5-rc.3`. Such a
+ * tree installs fine, binds a port, prints its URL, and then dies in profile
+ * settlement (`user patch-layer watching requires the Cordis HMR service`,
+ * observed 2026-10-01). Not a hard failure on its own — the boot gate is the
+ * verdict — but it is the first thing to name when a boot check fails on an
+ * engine that "should" be fine.
+ *
+ * Exported for testing.
+ */
+export function engineVersionDrift(dir) {
+  const root = readInstalledVersion(dir)
+  if (root === null) return []
+  const scope = join(dir, 'node_modules', '@deepseek-ai')
+  let entries
+  try {
+    entries = readdirSync(scope)
+  } catch {
+    return []
+  }
+  const drift = []
+  for (const name of entries) {
+    if (name === 'dsh' || !name.startsWith('dsh-')) continue
+    try {
+      const manifest = JSON.parse(readFileSync(join(scope, name, 'package.json'), 'utf8'))
+      if (typeof manifest.version === 'string' && manifest.version !== root) {
+        drift.push(`${manifest.name ?? `@deepseek-ai/${name}`}@${manifest.version}`)
+      }
+    } catch {
+      // an unreadable manifest is the gate's problem, not this check's
+    }
+  }
+  return drift.sort()
+}
+
+async function main() {
   const version = resolveEngineVersion()
   const pm = packageManager()
   if (pm === null) fail(`neither npm nor pnpm is available on PATH (PATH=${process.env.PATH ?? ''}) — a packaged app needs its runtime-bin shims, see updater:apply`)
@@ -324,6 +467,26 @@ function main() {
   pruneForeignPrebuilds(target)
   verify(target)
 
+  const drift = engineVersionDrift(target)
+  if (drift.length > 0) {
+    const shown = drift.slice(0, 4).join(', ')
+    const more = drift.length > 4 ? ` (+${drift.length - 4} more)` : ''
+    console.warn(`install-engine: WARNING — the installed tree mixes engine versions: dsh@${readInstalledVersion(target)} with ${shown}${more}. npm ranges float subpackages up; such a tree can bind a port and then die during profile settlement. The boot check is the verdict.`)
+  }
+
+  const bootFailure = await verifyBoot(target)
+  if (bootFailure !== null) {
+    const driftNote = drift.length === 0
+      ? ''
+      : `\nversion drift: dsh@${readInstalledVersion(target)} with ${drift.slice(0, 4).join(', ')}${drift.length > 4 ? ` (+${drift.length - 4} more)` : ''}`
+    // Never leave behind a tree that cannot start: the staging dir is
+    // discarded, and a first-time install removes the partial engine so the
+    // shell reports "engine missing" (with install guidance) rather than
+    // "engine exits immediately".
+    rmSync(target, { recursive: true, force: true })
+    fail(`${bootFailure}${driftNote}\ninstall-engine: the existing engine (if any) is untouched — ${target} was discarded`)
+  }
+
   if (target === STAGING_DIR) {
     // Atomic swap: old engine is preserved until the new tree verifies.
     const backup = `${ENGINE_DIR}.old`
@@ -343,5 +506,7 @@ function main() {
 }
 
 if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
-  main()
+  main().catch((error) => {
+    fail(`unexpected failure: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+  })
 }

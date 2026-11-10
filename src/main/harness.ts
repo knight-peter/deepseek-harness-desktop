@@ -44,6 +44,13 @@ export interface StartOptions {
   dshBin: string
   /** Extra Node CLI args for the engine process, before the script (e.g. `--require` preload). */
   nodeArgs?: string[]
+  /**
+   * Extra launcher-level CLI args (e.g. `--patch <overlay>`), inserted after
+   * `--profile web` and BEFORE `--port`/`--no-open`. Launcher options are only
+   * recognized before the app-arg section starts — putting them after
+   * `--port`/`--no-open` fails with `unknown option`.
+   */
+  args?: string[]
   /** Working directory for the engine process (default: user home). */
   cwd?: string
   /** Extra environment variables, merged over the current environment. */
@@ -173,11 +180,19 @@ export class Harness {
     // Under ELECTRON_RUN_AS_NODE the vendored loader's native internals hook
     // (node-addon-require-builtin) silently fails, so bare plugin specifiers
     // would not resolve; `--expose-internals` makes the loader use its plain
-    // require fallback instead (verified on Electron 43 / embedded Node 24).
+    // require fallback instead (verified on the embedded Node 24).
+    //
+    // ⚠️ That fallback no longer covers engine ≥ 0.1.6-alpha.1: its app-boot
+    // calls the native addon unconditionally during profile resolution, and
+    // that prebuilt binary only accepts specific Electron builds (exact V8
+    // fingerprints). The shell therefore pins Electron 44.0.0 and
+    // scripts/install-engine.mjs boot-checks every staged engine on this very
+    // binary before swapping it in — see docs/Electron基座应用开发.md §2.1.
+    //
     // `--no-open`: the engine would otherwise pop the system browser open to
     // the served URL (observed as a stray tab, e.g. http://127.0.0.1:60829);
     // the shell shows the UI in its own BrowserWindow, so never open a browser.
-    const child = spawn(process.execPath, ['--expose-internals', ...(options.nodeArgs ?? []), options.dshBin, '--profile', 'web', '--port', '0', '--no-open'], {
+    const child = spawn(process.execPath, ['--expose-internals', ...(options.nodeArgs ?? []), options.dshBin, '--profile', 'web', ...(options.args ?? []), '--port', '0', '--no-open'], {
       cwd: options.cwd ?? homedir(),
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...options.env },
       stdio: ['ignore', 'pipe', 'pipe'],

@@ -93,6 +93,28 @@ function engineDir(): string {
   return join(resources, 'engine')
 }
 
+/** Base resources directory (packaged: Resources/; dev: repo resources/). */
+function resourcesDir(): string {
+  return app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources')
+}
+
+/**
+ * Office primary-runtime payload directory (`resources/runtime/primary-runtime`),
+ * holding `runtime.json` + `dependencies/` — built by prepare-primary-runtime.
+ */
+function officePayloadDir(): string {
+  return join(resourcesDir(), 'runtime', 'primary-runtime')
+}
+
+/**
+ * Office skill patch overlay (`resources/office.patch.yml`), or '' when absent.
+ * Shipped outside the asar via extraResources so the engine loads it by path.
+ */
+function officePatchFile(): string {
+  const path = join(resourcesDir(), 'office.patch.yml')
+  return existsSync(path) ? path : ''
+}
+
 /** Engine child environment: Electron-as-node plus the inspect override. */
 function engineNodeEnv(): Record<string, string> {
   const env: Record<string, string> = { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
@@ -116,6 +138,14 @@ function engineNodeEnv(): Record<string, string> {
     }
   }
   if (nodeOptions.length > 0) env.NODE_OPTIONS = nodeOptions.join(' ')
+  // Office primary runtime: when the payload ships, point the engine's office
+  // overlay (resources/office.patch.yml, passed via engineCliArgs) at it. The
+  // overlay's plugins resolve this variable in the ENGINE's own process at
+  // boot — it never needs to survive into engine-spawned subprocesses, since
+  // the plugins keep the resolved absolute paths in-process.
+  if (existsSync(join(officePayloadDir(), 'runtime.json'))) {
+    env.DSH_BUNDLED_PRIMARY_RUNTIME = officePayloadDir()
+  }
   return env
 }
 
@@ -141,6 +171,18 @@ function engineNodeArgs(): string[] {
   if (process.platform !== 'win32') return []
   const preload = windowsHidePreload()
   return preload === '' ? [] : ['--require', preload]
+}
+
+/**
+ * Extra launcher-level CLI args for the engine process: `--patch` the Office
+ * overlay (resources/office.patch.yml) when it ships. Inserted after
+ * `--profile web` and before the app-args (`--port`/`--no-open`) — launcher
+ * options are not recognized inside the app-arg section. Empty when the
+ * overlay is absent (a dev checkout without the payload boots unchanged).
+ */
+function engineCliArgs(): string[] {
+  const patch = officePatchFile()
+  return patch === '' ? [] : ['--patch', patch]
 }
 
 /**
@@ -265,7 +307,7 @@ async function startEngine(): Promise<void> {
     return
   }
   try {
-    await harness.start({ dshBin, env: engineNodeEnv(), nodeArgs: engineNodeArgs() })
+    await harness.start({ dshBin, env: engineNodeEnv(), nodeArgs: engineNodeArgs(), args: engineCliArgs() })
   } catch (error) {
     // The harness already pushed an error state; add a friendly diagnosis
     // parsed from the engine's recent stderr.
@@ -337,7 +379,7 @@ function installContextMenu(win: BrowserWindow): void {
     if (params.linkURL !== '') {
       template.push(
         { type: 'separator' },
-        { label: '复制链接地址', click: () => clipboard.writeText(params.linkURL) },
+        { label: '复制链接地址', click: () => void clipboard.writeText(params.linkURL) },
         { label: '打开链接', click: () => void shell.openExternal(params.linkURL) },
       )
     }
@@ -373,7 +415,8 @@ function createWindow(): void {
  * page's own paste handling is broken or blocked.
  */
 async function pasteClipboardIntoFocused(): Promise<void> {
-  const text = clipboard.readText()
+  // Electron ≥ 44: the main-process clipboard is async (W3C-style).
+  const text = await clipboard.readText()
   if (text === '') return
   pasteTextToFocusedWindow(() => BrowserWindow.getFocusedWindow(), text)
 }
@@ -502,6 +545,7 @@ function tools(): Tools {
     dshBin: resolveDshBin(),
     nodeCommand: process.execPath,
     nodeArgs: engineNodeArgs(),
+    args: engineCliArgs(),
     env: engineNodeEnv(),
     profileDir: profileDir(),
     dshHome: dshHome(),

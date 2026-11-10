@@ -36,10 +36,20 @@ export interface ClipboardWatcherOptions {
  * change event; polling `clipboard.readText()` is the standard approach and
  * is cheap (a few KB of text). Only text is tracked — images/files are
  * out of scope for the paste-into-dsh use case.
+ *
+ * Electron ≥ 44 made the main-process clipboard **async**
+ * (`readText(): Promise<string>`, modeled on the W3C API), so the polling
+ * loop awaits it and the baseline is captured by the first read instead of
+ * synchronously in `start()`; otherwise an upgrade would silently compare a
+ * Promise against a string and never report a change.
  */
 export class ClipboardWatcher {
   private timer: NodeJS.Timeout | null = null
   private lastText = ''
+  /** False until the first read has established the baseline. */
+  private primed = false
+  /** True while a read is in flight (async clipboard); skips overlapping polls. */
+  private reading = false
   private readonly intervalMs: number
   private readonly onTextChange: (text: string) => void
 
@@ -51,13 +61,12 @@ export class ClipboardWatcher {
   /** Start polling (idempotent). */
   start(): void {
     if (this.timer !== null) return
-    this.lastText = clipboard.readText()
+    this.primed = false
+    // Read once immediately: the first read is the baseline, so whatever is
+    // already on the clipboard is never reported as a change.
+    void this.poll()
     this.timer = setInterval(() => {
-      const text = clipboard.readText()
-      if (text !== this.lastText) {
-        this.lastText = text
-        this.onTextChange(text)
-      }
+      void this.poll()
     }, this.intervalMs)
   }
 
@@ -66,6 +75,28 @@ export class ClipboardWatcher {
     if (this.timer === null) return
     clearInterval(this.timer)
     this.timer = null
+  }
+
+  private async poll(): Promise<void> {
+    if (this.reading) return
+    this.reading = true
+    try {
+      const text = await clipboard.readText()
+      if (!this.primed) {
+        this.primed = true
+        this.lastText = text
+        return
+      }
+      if (text !== this.lastText) {
+        this.lastText = text
+        this.onTextChange(text)
+      }
+    } catch {
+      // Clipboard temporarily unavailable (no display / platform quirk):
+      // stay silent rather than spamming the log every interval.
+    } finally {
+      this.reading = false
+    }
   }
 }
 
